@@ -777,6 +777,70 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": True, "eliminadas": eliminadas})
                 return
 
+            if path == "/api/previsualizar-huellero":
+                archivos_payload = body.get("archivos", [])
+                columna_id = str(body.get("columna_id", "ID_Empleado")).strip()
+                columna_fecha = str(body.get("columna_fecha", "Fecha")).strip()
+                columna_hora = str(body.get("columna_hora", "Hora")).strip()
+
+                if not archivos_payload:
+                    self._error_response("Suba al menos un archivo Excel para previsualizar.")
+                    return
+
+                registros_totales = []
+                empleados_detectados = set()
+                fechas_detectadas = []
+                resumen_archivos = []
+
+                for arch in archivos_payload:
+                    fname = Path(str(arch.get("filename", "huellero.xlsx"))).name
+                    b64 = str(arch.get("content_base64", ""))
+                    if not b64:
+                        continue
+                    raw = base64.b64decode(b64.split(",")[-1])
+                    dest = UPLOADS_DIR / f"preview_{datetime.now():%Y%m%d_%H%M%S}_{fname}"
+                    dest.write_bytes(raw)
+                    try:
+                        df = normalizar_huellero(str(dest), columna_id, columna_fecha, columna_hora)
+                        resumen_archivos.append(
+                            {
+                                "archivo": fname,
+                                "hoja": df.attrs.get("hoja_origen") or "Principal",
+                                "marcaciones": len(df),
+                            }
+                        )
+                        if not df.empty:
+                            for _, r in df.iterrows():
+                                emp_id = str(r["id_empleado"]).strip()
+                                empleados_detectados.add(emp_id)
+                                f_dt = pd.to_datetime(r["fecha"], errors="coerce")
+                                if pd.notna(f_dt):
+                                    fechas_detectadas.append(f_dt.date())
+                                if len(registros_totales) < 25:
+                                    registros_totales.append(
+                                        {
+                                            "id_empleado": emp_id,
+                                            "nombre": str(r["nombre"] or ""),
+                                            "fecha": f_dt.strftime("%Y-%m-%d") if pd.notna(f_dt) else "",
+                                            "hora": str(r["hora"] or ""),
+                                        }
+                                    )
+                    finally:
+                        dest.unlink(missing_ok=True)
+
+                self._json_response(
+                    {
+                        "ok": True,
+                        "archivos": resumen_archivos,
+                        "total_marcaciones": sum(a["marcaciones"] for a in resumen_archivos),
+                        "total_empleados": len(empleados_detectados),
+                        "fecha_min": min(fechas_detectadas).isoformat() if fechas_detectadas else "",
+                        "fecha_max": max(fechas_detectadas).isoformat() if fechas_detectadas else "",
+                        "muestra": registros_totales,
+                    }
+                )
+                return
+
             if path == "/api/procesar-huellero":
                 archivos_payload = body.get("archivos", [])
                 fecha_inicio = date.fromisoformat(str(body.get("fecha_inicio", "")).strip())
@@ -967,6 +1031,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 direccion = str(body.get("direccion", "")).strip()
                 dispositivo = str(body.get("dispositivo", "App Celular")).strip()
                 observaciones = str(body.get("observaciones", "")).strip()
+                foto_base64 = str(body.get("foto_base64", "")).strip()
 
                 if not id_empleado:
                     self._error_response("ID de empleado requerido.")
@@ -999,6 +1064,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     direccion=direccion,
                     dispositivo=dispositivo,
                     observaciones=observaciones,
+                    foto_base64=foto_base64,
                 )
                 self._json_response(
                     {

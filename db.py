@@ -98,6 +98,14 @@ class Database:
         if "cargo" not in columnas_emp:
             self.connection.execute("ALTER TABLE empleados ADD COLUMN cargo TEXT DEFAULT 'Operario'")
 
+        # Asegurar columna foto_base64 en marcaciones_moviles
+        columnas_marc = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(marcaciones_moviles)").fetchall()
+        }
+        if "foto_base64" not in columnas_marc:
+            self.connection.execute("ALTER TABLE marcaciones_moviles ADD COLUMN foto_base64 TEXT DEFAULT ''")
+
         # Asegurar columna rol en usuarios_admin (soporta 'superadmin', 'admin' y 'supervisor')
         columnas_usr = {
             row["name"]
@@ -558,6 +566,7 @@ class Database:
         direccion: str = "",
         dispositivo: str = "App Móvil / Web",
         observaciones: str = "",
+        foto_base64: str = "",
         fecha_hora: Optional[str] = None,
     ) -> int:
         from datetime import datetime
@@ -565,8 +574,8 @@ class Database:
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO marcaciones_moviles
-                   (id_empleado, fecha_hora, tipo, latitud, longitud, precision_m, direccion, dispositivo, observaciones)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id_empleado, fecha_hora, tipo, latitud, longitud, precision_m, direccion, dispositivo, observaciones, foto_base64)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(id_empleado).strip(),
                     ahora,
@@ -577,6 +586,7 @@ class Database:
                     direccion,
                     dispositivo,
                     observaciones,
+                    foto_base64,
                 ),
             )
             return int(cursor.lastrowid)

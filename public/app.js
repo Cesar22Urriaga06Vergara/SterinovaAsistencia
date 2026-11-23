@@ -1,18 +1,24 @@
 /* =========================================================================
-   STERINOVA - Sistema Web En Línea & App Móvil de Asistencia y Nómina
-   Roles separados con Login Unificado Inteligente:
-   1) SUPERADMIN: Crea/administra Administradores, Supervisores, sube Empleados
-      y tiene acceso completo a todos los módulos.
-   2) ADMINISTRADOR: Catálogo de Turnos, Festivos, Asignación, Procesar Huellero,
-      Análisis/Reportes Excel, Empleados, Solicitudes y GPS.
-   3) SUPERVISOR: Vista operativa (Asignar Turnos, Monitoreo GPS con Dirección
-      y Coordenadas, Solicitudes/Permisos del personal y Novedades).
-   4) EMPLEADO: Reloj GPS con Dirección y Coordenadas, Mis Turnos, Mis Horas
-      Extras/Recargos y Solicitud de Permisos.
+   STERINOVA - Plataforma Inteligente Web & App Móvil de Asistencia y Nómina
+   Edición Mejorada Premium:
+   - Login Unificado con detección automática de Rol (Superadmin, Admin, Supervisor, Empleado)
+   - Modo Oscuro / Claro persistente + Glassmorphism
+   - Gráficas interactivas Chart.js (Horas Extra, Recargos ED/EN/EF/END/RN/RND/RF, Estados)
+   - Mapa interactivo en vivo (Leaflet/OpenStreetMap) con pines de marcaciones GPS + Dirección
+   - Calendario Individual/Grupal + Matriz Gantt Semanal/Mensual con colores por turno
+   - Zona Drag & Drop para Excel del Huellero con vista previa instantánea antes de liquidar
+   - Vista Previa en pantalla de la Hoja de Turnos Corporativa + Impresión / Exportación PDF
+   - Cámara Selfie opcional y nota rápida al marcar Entrada/Salida GPS desde el celular
    ========================================================================= */
+
+const SHIFT_COLORS = [
+  "#0284C7", "#7C3AED", "#0D9488", "#D97706", "#DC2626",
+  "#2563EB", "#9333EA", "#059669", "#EA580C", "#4F46E5"
+];
 
 const STATE = {
   user: JSON.parse(localStorage.getItem("sterinova_user") || "null"),
+  darkMode: localStorage.getItem("sterinova_dark") === "true",
   activeView: "dashboard",
   deferredInstallPrompt: null,
   // Datos compartidos
@@ -25,12 +31,18 @@ const STATE = {
   reportes: [],
   solicitudes: [],
   marcacionesMoviles: [],
-  // Estado Asignación de Turnos
+  // Asignación de Turnos (Paso 3)
   calMonth: new Date().toISOString().slice(0, 7),
+  asignacionModoVista: "calendario", // 'calendario' | 'matriz'
   selectedEmployees: new Set(),
   selectedDates: new Set(),
   searchEmpAsignacion: "",
-  // Estado Análisis
+  // Procesar Huellero Drag & Drop (Paso 4)
+  huelleroFiles: [],
+  huelleroPreview: null,
+  // Análisis, Gráficas y Hoja Imprimible (Paso 5)
+  analisisTab: "tabla", // 'tabla' | 'hoja_imprimible'
+  hojaEmpleadoId: "",
   analisisData: {
     kpis: { horas_extra: 0, minutos_tardanza: 0, ausencias: 0, llegadas_tempranas: 0 },
     filas: [],
@@ -44,10 +56,39 @@ const STATE = {
     fecha_fin: "",
     kpi: ""
   },
-  // Estado Portal Empleado
+  // Portal Empleado + Cámara Selfie
   empResumen: null,
-  gpsActual: null
+  gpsActual: null,
+  cameraStream: null,
+  selfieBase64: "",
+  notaMarcacion: ""
 };
+
+// Instancias activas de Chart.js y Leaflet
+let chartRecargosInstance = null;
+let chartEstadosInstance = null;
+let leafletMapInstance = null;
+
+function applyTheme() {
+  if (STATE.darkMode) {
+    document.body.classList.add("dark-mode");
+  } else {
+    document.body.classList.remove("dark-mode");
+  }
+}
+
+function toggleDarkMode() {
+  STATE.darkMode = !STATE.darkMode;
+  localStorage.setItem("sterinova_dark", String(STATE.darkMode));
+  applyTheme();
+  renderApp();
+}
+
+function getShiftColor(idTurno, esDescanso = false) {
+  if (esDescanso) return "#10B981";
+  if (!idTurno) return "#64748B";
+  return SHIFT_COLORS[Number(idTurno) % SHIFT_COLORS.length];
+}
 
 window.addEventListener("beforeinstallprompt", (e) => {
   e.preventDefault();
@@ -66,11 +107,11 @@ function showToast(msg, type = "info") {
   if (!container) return;
   const el = document.createElement("div");
   el.className = "toast";
-  if (type === "error") el.style.borderLeftColor = "#B3261E";
-  if (type === "success") el.style.borderLeftColor = "#22C55E";
+  if (type === "error") el.style.borderLeftColor = "#EF4444";
+  if (type === "success") el.style.borderLeftColor = "#10B981";
   el.textContent = msg;
   container.appendChild(el);
-  setTimeout(() => el.remove(), 3800);
+  setTimeout(() => el.remove(), 4000);
 }
 
 async function apiFetch(url, options = {}) {
@@ -94,7 +135,15 @@ function fileToBase64(file) {
   });
 }
 
+function stopCameraStream() {
+  if (STATE.cameraStream) {
+    STATE.cameraStream.getTracks().forEach((t) => t.stop());
+    STATE.cameraStream = null;
+  }
+}
+
 function setUser(user) {
+  stopCameraStream();
   STATE.user = user;
   if (user) {
     localStorage.setItem("sterinova_user", JSON.stringify(user));
@@ -110,6 +159,7 @@ function setUser(user) {
 }
 
 async function initRoleData() {
+  applyTheme();
   try {
     if (!STATE.user) {
       renderApp();
@@ -133,6 +183,9 @@ async function initRoleData() {
       if (STATE.empleados.length > 0 && STATE.selectedEmployees.size === 0) {
         STATE.selectedEmployees.add(STATE.empleados[0].id_empleado);
       }
+      if (STATE.empleados.length > 0 && !STATE.hojaEmpleadoId) {
+        STATE.hojaEmpleadoId = STATE.empleados[0].id_empleado;
+      }
       await loadAsignaciones();
       await loadAnalisis();
     } else {
@@ -146,37 +199,17 @@ async function initRoleData() {
   }
 }
 
-async function loadDashboard() {
-  STATE.dashboard = await apiFetch("/api/dashboard");
-}
-async function loadUsuarios() {
-  const r = await apiFetch("/api/usuarios");
-  STATE.usuarios = r.usuarios || [];
-}
-async function loadTurnos() {
-  const r = await apiFetch("/api/turnos");
-  STATE.turnos = r.turnos || [];
-}
-async function loadFestivos() {
-  const r = await apiFetch("/api/festivos");
-  STATE.festivos = r.festivos || [];
-}
-async function loadEmpleados() {
-  const r = await apiFetch("/api/empleados");
-  STATE.empleados = r.empleados || [];
-}
+async function loadDashboard() { STATE.dashboard = await apiFetch("/api/dashboard"); }
+async function loadUsuarios() { const r = await apiFetch("/api/usuarios"); STATE.usuarios = r.usuarios || []; }
+async function loadTurnos() { const r = await apiFetch("/api/turnos"); STATE.turnos = r.turnos || []; }
+async function loadFestivos() { const r = await apiFetch("/api/festivos"); STATE.festivos = r.festivos || []; }
+async function loadEmpleados() { const r = await apiFetch("/api/empleados"); STATE.empleados = r.empleados || []; }
 async function loadAsignaciones() {
   const r = await apiFetch(`/api/asignaciones?mes=${encodeURIComponent(STATE.calMonth)}`);
   STATE.asignaciones = r.asignaciones || [];
 }
-async function loadReportes() {
-  const r = await apiFetch("/api/reportes");
-  STATE.reportes = r.reportes || [];
-}
-async function loadSolicitudes() {
-  const r = await apiFetch("/api/solicitudes");
-  STATE.solicitudes = r.solicitudes || [];
-}
+async function loadReportes() { const r = await apiFetch("/api/reportes"); STATE.reportes = r.reportes || []; }
+async function loadSolicitudes() { const r = await apiFetch("/api/solicitudes"); STATE.solicitudes = r.solicitudes || []; }
 async function loadMarcacionesMoviles() {
   const r = await apiFetch("/api/marcaciones-moviles");
   STATE.marcacionesMoviles = r.marcaciones || [];
@@ -246,10 +279,11 @@ function obtenerUbicacionGPS() {
 }
 
 // ============================================================================
-// RENDERIZADO PRINCIPAL SEGÚN ROL
+// RENDERIZADO PRINCIPAL
 // ============================================================================
 
 function renderApp() {
+  applyTheme();
   const root = document.getElementById("app");
   if (!root) return;
 
@@ -265,20 +299,34 @@ function renderApp() {
   } else {
     root.innerHTML = renderManagementLayout();
     bindManagementEvents();
+    // Inicializar gráficas o mapas si la vista activa los contiene
+    setTimeout(() => {
+      if (STATE.activeView === "analisis" || STATE.activeView === "dashboard") {
+        initAnalisisCharts();
+      }
+      if (STATE.activeView === "gps_solicitudes") {
+        initGpsLeafletMap();
+      }
+    }, 60);
   }
 }
 
 // ============================================================================
-// LOGIN UNIFICADO INTELIGENTE (SIN PESTAÑAS, DETECTA EL ROL AUTOMÁTICAMENTE)
+// LOGIN UNIFICADO INTELIGENTE
 // ============================================================================
 
 function renderLoginScreen() {
   return `
     <div class="login-wrapper">
       <div class="login-card">
+        <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+          <button type="button" id="btn-theme-login" class="btn btn-outline btn-sm">
+            ${STATE.darkMode ? "☀️ Modo Claro" : "🌙 Modo Oscuro"}
+          </button>
+        </div>
         <img src="/api/branding/logo" alt="Sterinova" class="login-logo" onerror="this.style.display='none'" />
         <div class="login-title">Sistema de Control de Asistencia</div>
-        <div class="login-subtitle">Ingreso Unificado En Línea y App Móvil</div>
+        <div class="login-subtitle">Plataforma Inteligente Web & App Móvil</div>
 
         <form id="form-login-unificado">
           <div class="form-group">
@@ -303,15 +351,15 @@ function renderLoginScreen() {
               required
             />
           </div>
-          <button type="submit" class="btn btn-primary btn-block" style="margin-top:12px; padding:14px; font-size:1rem;">
-            Iniciar Sesión
+          <button type="submit" class="btn btn-primary btn-block" style="margin-top:14px; padding:14px; font-size:1rem;">
+            Iniciar Sesión →
           </button>
         </form>
 
         ${
           STATE.deferredInstallPrompt
             ? `
-          <button type="button" id="btn-install-pwa-login" class="btn btn-outline btn-block" style="margin-top:16px;">
+          <button type="button" id="btn-install-pwa-login" class="btn btn-action btn-block" style="margin-top:16px;">
             📲 Instalar como App en este Celular / PC
           </button>
         `
@@ -323,6 +371,8 @@ function renderLoginScreen() {
 }
 
 function bindLoginEvents() {
+  document.getElementById("btn-theme-login")?.addEventListener("click", toggleDarkMode);
+
   const form = document.getElementById("form-login-unificado");
   if (form) {
     form.addEventListener("submit", async (e) => {
@@ -360,7 +410,7 @@ function bindLoginEvents() {
 }
 
 // ============================================================================
-// NAVEGACIÓN SEPARADA POR ROL (SUPERADMIN, ADMIN, SUPERVISOR)
+// MENÚ Y LAYOUT POR ROL (SUPERADMIN, ADMIN, SUPERVISOR)
 // ============================================================================
 
 function getMenuForRole(role) {
@@ -371,10 +421,10 @@ function getMenuForRole(role) {
       { id: "dashboard", icon: "📊", label: "Inicio y Resumen", step: "MENÚ", short: "Inicio" },
       { id: "turnos", icon: "🕒", label: "Catálogo de Turnos", step: "PASO 1", short: "Turnos" },
       { id: "festivos", icon: "📅", label: "Días Festivos", step: "PASO 2", short: "Festivos" },
-      { id: "asignacion", icon: "🗓️", label: "Asignación de Turnos", step: "PASO 3", short: "Asignar" },
+      { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "PASO 3", short: "Asignar" },
       { id: "procesar", icon: "⚙️", label: "Procesar Huellero", step: "PASO 4", short: "Huellero" },
-      { id: "analisis", icon: "📈", label: "Análisis y Métricas", step: "PASO 5", short: "Métricas" },
-      { id: "gps_solicitudes", icon: "📍", label: "GPS y Solicitudes", step: "MÓVIL", short: "GPS" }
+      { id: "analisis", icon: "📈", label: "Análisis y Gráficas", step: "PASO 5", short: "Métricas" },
+      { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "MÓVIL", short: "Mapa GPS" }
     ];
   }
 
@@ -383,19 +433,19 @@ function getMenuForRole(role) {
       { id: "dashboard", icon: "📊", label: "Inicio y Resumen", step: "MENÚ", short: "Inicio" },
       { id: "turnos", icon: "🕒", label: "Catálogo de Turnos", step: "PASO 1", short: "Turnos" },
       { id: "festivos", icon: "📅", label: "Días Festivos", step: "PASO 2", short: "Festivos" },
-      { id: "asignacion", icon: "🗓️", label: "Asignación de Turnos", step: "PASO 3", short: "Asignar" },
+      { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "PASO 3", short: "Asignar" },
       { id: "procesar", icon: "⚙️", label: "Procesar Huellero", step: "PASO 4", short: "Huellero" },
-      { id: "analisis", icon: "📈", label: "Análisis y Métricas", step: "PASO 5", short: "Métricas" },
+      { id: "analisis", icon: "📈", label: "Análisis y Gráficas", step: "PASO 5", short: "Métricas" },
       { id: "empleados", icon: "👥", label: "Empleados y Excel", step: "PERSONAL", short: "Empleados" },
-      { id: "gps_solicitudes", icon: "📍", label: "GPS y Solicitudes", step: "MÓVIL", short: "GPS" }
+      { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "MÓVIL", short: "Mapa GPS" }
     ];
   }
 
-  // Rol: SUPERVISOR (Enfocado en operación de planta, programación de turnos, asistencia GPS y permisos)
+  // Rol: SUPERVISOR
   return [
-    { id: "asignacion", icon: "🗓️", label: "Asignación de Turnos", step: "TURNOS", short: "Asignar" },
-    { id: "gps_solicitudes", icon: "📍", label: "Monitoreo GPS y Permisos", step: "CAMPO", short: "GPS/Permisos" },
-    { id: "analisis", icon: "📈", label: "Novedades y Asistencia", step: "CONTROL", short: "Novedades" }
+    { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "TURNOS", short: "Asignar" },
+    { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "CAMPO", short: "Mapa GPS" },
+    { id: "analisis", icon: "📈", label: "Novedades y Gráficas", step: "CONTROL", short: "Novedades" }
   ];
 }
 
@@ -425,7 +475,7 @@ function renderManagementLayout() {
           <div class="avatar-circle">${roleInfo.icon}</div>
           <div>
             <div style="font-weight:700; font-size:0.92rem;">${STATE.user.nombre}</div>
-            <div style="font-size:0.76rem; opacity:0.8;">${roleInfo.text} (${STATE.user.id})</div>
+            <div style="font-size:0.75rem; opacity:0.8;">${roleInfo.text} (${STATE.user.id})</div>
           </div>
         </div>
         <nav class="sidebar-nav">
@@ -455,7 +505,10 @@ function renderManagementLayout() {
           <div>
             <div class="topbar-title">${currentNav.icon} ${currentNav.label}</div>
           </div>
-          <div style="display:flex; gap:10px; align-items:center;">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button type="button" id="btn-toggle-theme" class="btn btn-outline btn-sm" title="Cambiar tema">
+              ${STATE.darkMode ? "☀️ Claro" : "🌙 Oscuro"}
+            </button>
             ${
               STATE.deferredInstallPrompt
                 ? `<button type="button" id="btn-install-pwa" class="btn btn-action btn-sm">📲 Instalar App</button>`
@@ -463,7 +516,7 @@ function renderManagementLayout() {
             }
             <span class="badge badge-info">${roleInfo.icon} ${roleInfo.text}</span>
             <button type="button" id="btn-top-logout" class="btn btn-danger btn-sm">
-              Cerrar Sesión
+              Salir
             </button>
           </div>
         </header>
@@ -515,34 +568,34 @@ function renderManagementViewContent() {
   }
 }
 
-// --- VISTA EXCLUSIVA SUPERADMIN: GESTIÓN DE USUARIOS (ADMINS Y SUPERVISORES) ---
+// --- VISTA SUPERADMIN: GESTIÓN DE USUARIOS ---
 function renderSuperadminUsuarios() {
   return `
     <div class="alert-banner alert-ok">
       <div>
-        <strong>👑 Panel de Superadministrador:</strong> Desde aquí puedes crear las cuentas de <strong>Administradores</strong> y <strong>Supervisores</strong>. Luego ve a <strong>Empleados y Excel</strong> para cargar la plantilla de empleados.
+        <strong>👑 Control Maestro Superadministrador:</strong> Crea cuentas para tus <strong>Administradores</strong> y <strong>Supervisores</strong>. Luego carga la plantilla de trabajadores en <strong>Empleados y Excel</strong>.
       </div>
       <button type="button" class="btn btn-primary btn-sm" data-goto="empleados">
-        Ir a Subir Excel de Empleados →
+        Subir Excel de Empleados →
       </button>
     </div>
 
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title" id="usr-form-title">Crear / Actualizar Usuario (Administrador o Supervisor)</div>
+          <div class="card-title">Crear / Actualizar Usuario del Sistema</div>
         </div>
         <form id="form-usuario-sistema">
           <div class="grid-2">
             <div class="form-group">
               <label class="form-label">Usuario de Ingreso (Username)</label>
-              <input type="text" id="usr-username" class="form-control" placeholder="Ej: admin_rrhh o sup_planta1" required />
+              <input type="text" id="usr-username" class="form-control" placeholder="Ej: admin_rrhh o sup_planta" required />
             </div>
             <div class="form-group">
-              <label class="form-label">Rol en el Sistema</label>
+              <label class="form-label">Rol Asignado</label>
               <select id="usr-rol" class="form-control">
-                <option value="admin">🛡️ Administrador (Gestión y Nómina)</option>
-                <option value="supervisor">👷 Supervisor (Turnos, GPS y Permisos)</option>
+                <option value="admin">🛡️ Administrador (Gestión, Huellero y Nómina)</option>
+                <option value="supervisor">👷 Supervisor (Turnos, Mapa GPS y Permisos)</option>
                 <option value="superadmin">👑 Superadministrador (Control Total)</option>
               </select>
             </div>
@@ -550,7 +603,7 @@ function renderSuperadminUsuarios() {
           <div class="grid-2">
             <div class="form-group">
               <label class="form-label">Nombre Completo</label>
-              <input type="text" id="usr-nombre" class="form-control" placeholder="Ej: Carlos Pérez" required />
+              <input type="text" id="usr-nombre" class="form-control" placeholder="Nombre y Apellido" required />
             </div>
             <div class="form-group">
               <label class="form-label">Contraseña</label>
@@ -566,7 +619,7 @@ function renderSuperadminUsuarios() {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Usuarios Administrativos y Supervisores (${STATE.usuarios.length})</div>
+          <div class="card-title">Cuentas de Gestión Registradas (${STATE.usuarios.length})</div>
         </div>
         <div class="table-responsive">
           <table>
@@ -608,7 +661,7 @@ function renderSuperadminUsuarios() {
   `;
 }
 
-// --- VISTA: DASHBOARD PRINCIPAL ---
+// --- VISTA: DASHBOARD EJECUTIVO ---
 function renderAdminDashboard() {
   const d = STATE.dashboard || {
     total_empleados: STATE.empleados.length,
@@ -624,44 +677,44 @@ function renderAdminDashboard() {
     {
       step: "PASO 1",
       title: "Catálogo de Turnos",
-      desc: "Crear y editar plantillas de jornada, cruces de medianoche y descansos.",
+      desc: "Crear plantillas de jornada con colores identificadores, tolerancias y cruces de medianoche.",
       view: "turnos",
       meta: `${d.total_turnos} turnos activos`
     },
     {
       step: "PASO 2",
       title: "Días Festivos",
-      desc: "Registrar calendario no laboral o cargar festivos de Colombia con un clic.",
+      desc: "Registrar calendario no laboral o cargar automáticamente los festivos de Colombia (Ley Emiliani).",
       view: "festivos",
-      meta: `${STATE.festivos.length} festivos registrados`
+      meta: `${STATE.festivos.length} festivos`
     },
     {
       step: "PASO 3",
-      title: "Asignación de Turnos",
-      desc: "Asignar turnos o descansos por calendario interactivo o por patrones semanales.",
+      title: "Asignación & Matriz Gantt",
+      desc: "Programar turnos en calendario interactivo, por patrón semanal o ver la matriz Gantt de todo el personal.",
       view: "asignacion",
       meta: d.ultima_fecha_asignada ? `Hasta ${d.ultima_fecha_asignada}` : "Sin asignaciones"
     },
     {
       step: "PASO 4",
-      title: "Procesar Huellero y Exportar",
-      desc: "Subir Excel del biométrico + marcaciones de App Móvil y descargar reportes corporativos.",
+      title: "Procesar Huellero (Drag & Drop)",
+      desc: "Arrastrar archivos Excel del biométrico con vista previa instantánea y generar reportes corporativos.",
       view: "procesar",
       meta: `${STATE.reportes.length} reportes Excel`
     },
     {
       step: "PASO 5",
-      title: "Análisis y Métricas",
-      desc: "Consultar novedades, filtrar por KPI y exportar reporte de 6 pestañas.",
+      title: "Análisis, Gráficas y Hoja PDF",
+      desc: "Gráficas de recargos (ED, EN, EF, END, RN, RND, RF), vista previa de Hoja de Turnos e impresión PDF.",
       view: "analisis",
       meta: `${(d.kpis?.horas_extra || 0).toFixed(2)} h extra`
     },
     {
-      step: "PERSONAL & GPS",
-      title: "Empleados, Reloj GPS y Solicitudes",
-      desc: "Subir empleados desde Excel, administrar PIN de celular, marcaciones con dirección GPS y permisos.",
-      view: "empleados",
-      meta: `${d.total_empleados} empleados registrados`
+      step: "MAPA GPS & PERSONAL",
+      title: "Mapa GPS en Vivo, Selfie y Permisos",
+      desc: "Ver en el mapa interactivo dónde marcó cada empleado con dirección, foto selfie y aprobar solicitudes.",
+      view: "gps_solicitudes",
+      meta: `${STATE.marcacionesMoviles.length} marcas GPS`
     }
   ];
 
@@ -671,13 +724,13 @@ function renderAdminDashboard() {
         <strong>Estado de Programación:</strong> ${d.mensaje_alerta}
       </div>
       <button type="button" class="btn btn-primary btn-sm" data-goto="asignacion">
-        Ir a Asignar Turnos →
+        Programar Turnos →
       </button>
     </div>
 
     <div class="grid-4" style="margin-bottom:20px;">
       <div class="kpi-card" data-goto="empleados">
-        <div class="kpi-label">Empleados Registrados</div>
+        <div class="kpi-label">Empleados Activos</div>
         <div class="kpi-value">${d.total_empleados}</div>
       </div>
       <div class="kpi-card" data-goto="turnos">
@@ -689,23 +742,42 @@ function renderAdminDashboard() {
         <div class="kpi-value">${Number(d.kpis?.horas_extra || 0).toFixed(2)}</div>
       </div>
       <div class="kpi-card" data-goto="gps_solicitudes">
-        <div class="kpi-label">Marcaciones GPS / Solicitudes</div>
+        <div class="kpi-label">Marcas GPS / Permisos</div>
         <div class="kpi-value">${STATE.marcacionesMoviles.length} / ${STATE.solicitudes.length}</div>
       </div>
     </div>
 
-    <div class="grid-2">
+    <div class="grid-2" style="margin-bottom:20px;">
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">📊 Distribución de Horas Extra y Recargos</div>
+        </div>
+        <div style="height:220px; position:relative;">
+          <canvas id="chart-recargos"></canvas>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">🎯 Comportamiento de Asistencia</div>
+        </div>
+        <div style="height:220px; position:relative;">
+          <canvas id="chart-estados"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid-3">
       ${steps
         .map(
           (s) => `
         <div class="card" style="margin-bottom:0; display:flex; flex-direction:column; justify-content:space-between;">
           <div>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
               <span class="badge badge-info" style="color:var(--naranja); background:var(--naranja-light);">${s.step}</span>
               <span class="badge badge-info">${s.meta}</span>
             </div>
             <div class="card-title" style="margin-bottom:6px;">${s.title}</div>
-            <p style="font-size:0.9rem; color:var(--texto-sec); margin-bottom:16px;">${s.desc}</p>
+            <p style="font-size:0.88rem; color:var(--texto-sec); margin-bottom:16px;">${s.desc}</p>
           </div>
           <button type="button" class="btn btn-primary btn-block" data-goto="${s.view}">
             Abrir Módulo
@@ -718,7 +790,7 @@ function renderAdminDashboard() {
   `;
 }
 
-// --- VISTA 1: CATÁLOGO DE TURNOS ---
+// --- VISTA 1: CATÁLOGO DE TURNOS CON COLORES ---
 function renderAdminTurnos() {
   return `
     <div class="grid-2">
@@ -767,7 +839,7 @@ function renderAdminTurnos() {
           <table>
             <thead>
               <tr>
-                <th>Nombre</th>
+                <th>Color / Nombre</th>
                 <th>Entrada</th>
                 <th>Salida</th>
                 <th>Cruza Medianoche</th>
@@ -777,26 +849,30 @@ function renderAdminTurnos() {
             <tbody>
               ${
                 STATE.turnos.length === 0
-                  ? `<tr><td colspan="5" style="text-align:center; padding:20px;">No hay turnos creados aún.</td></tr>`
+                  ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay turnos creados aún.</td></tr>`
                   : STATE.turnos
-                      .map(
-                        (t) => `
+                      .map((t) => {
+                        const color = getShiftColor(t.id);
+                        return `
                 <tr>
-                  <td><strong>${t.nombre}</strong></td>
+                  <td>
+                    <span style="display:inline-block; width:12px; height:12px; border-radius:4px; background:${color}; margin-right:8px;"></span>
+                    <strong>${t.nombre}</strong>
+                  </td>
                   <td>${t.hora_entrada}</td>
                   <td>${t.hora_salida}</td>
                   <td>${
                     t.cruza_medianoche
-                      ? '<span class="badge badge-warn">Sí (Nocturno)</span>'
-                      : '<span class="badge badge-ok">No</span>'
+                      ? '<span class="badge badge-warn">🌙 Sí (Nocturno)</span>'
+                      : '<span class="badge badge-ok">☀️ Diurno</span>'
                   }</td>
                   <td>
                     <button type="button" class="btn btn-outline btn-sm btn-edit-turno" data-id="${t.id}">Editar</button>
                     <button type="button" class="btn btn-danger btn-sm btn-del-turno" data-id="${t.id}">Eliminar</button>
                   </td>
                 </tr>
-              `
-                      )
+              `;
+                      })
                       .join("")
               }
             </tbody>
@@ -855,7 +931,7 @@ function renderAdminFestivos() {
             <tbody>
               ${
                 STATE.festivos.length === 0
-                  ? `<tr><td colspan="3" style="text-align:center; padding:20px;">No hay festivos cargados. Pulsa "Cargar Festivos Colombia".</td></tr>`
+                  ? `<tr><td colspan="3" style="text-align:center; padding:22px;">No hay festivos cargados. Pulsa "Cargar Festivos Colombia".</td></tr>`
                   : STATE.festivos
                       .map(
                         (f) => `
@@ -880,7 +956,7 @@ function renderAdminFestivos() {
   `;
 }
 
-// --- VISTA 3: ASIGNACIÓN DE TURNOS ---
+// --- VISTA 3: ASIGNACIÓN DE TURNOS + MATRIZ GANTT MENSUAL ---
 function renderAdminAsignacion() {
   const [year, month] = STATE.calMonth.split("-").map(Number);
   const firstDay = new Date(year, month - 1, 1);
@@ -888,6 +964,111 @@ function renderAdminAsignacion() {
   const startWeekday = (firstDay.getDay() + 6) % 7;
 
   const festivosSet = new Set(STATE.festivos.map((f) => f.fecha));
+
+  const modeSwitcher = `
+    <div class="card" style="padding:14px 20px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+      <div style="display:flex; gap:10px;">
+        <button type="button" class="btn ${STATE.asignacionModoVista === "calendario" ? "btn-primary" : "btn-outline"} btn-sm" data-asig-mode="calendario">
+          🗓️ Calendario Interactivo & Patrones
+        </button>
+        <button type="button" class="btn ${STATE.asignacionModoVista === "matriz" ? "btn-primary" : "btn-outline"} btn-sm" data-asig-mode="matriz">
+          📊 Matriz Gantt Mensual (Todos los Empleados)
+        </button>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <label style="font-weight:700; font-size:0.86rem;">Mes:</label>
+        <input type="month" id="cal-month-picker" class="form-control" value="${STATE.calMonth}" style="width:170px;" />
+      </div>
+    </div>
+  `;
+
+  if (STATE.asignacionModoVista === "matriz") {
+    // Construir mapa empleado -> fecha -> asignacion
+    const mapEmpFecha = {};
+    STATE.asignaciones.forEach((a) => {
+      if (!mapEmpFecha[a.id_empleado]) mapEmpFecha[a.id_empleado] = {};
+      mapEmpFecha[a.id_empleado][a.fecha] = a;
+    });
+
+    const daysArray = Array.from({ length: daysInMonth }, (_, i) => i + 1);
+
+    return `
+      ${modeSwitcher}
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📊 Matriz Gantt de Turnos Asignados — ${STATE.calMonth}</div>
+          <div style="display:flex; gap:10px; flex-wrap:wrap; font-size:0.78rem;">
+            <span class="badge badge-ok">D = Descanso</span>
+            ${STATE.turnos
+              .slice(0, 6)
+              .map(
+                (t) =>
+                  `<span class="badge" style="background:${getShiftColor(t.id)}; color:#fff;">${t.nombre.slice(0, 14)}</span>`
+              )
+              .join("")}
+          </div>
+        </div>
+        <div class="table-responsive" style="max-height:600px;">
+          <table class="gantt-table">
+            <thead>
+              <tr>
+                <th style="position:sticky; left:0; z-index:10; min-width:200px;">Empleado</th>
+                ${daysArray
+                  .map((d) => {
+                    const fIso = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+                    const isHol = festivosSet.has(fIso);
+                    return `<th style="${isHol ? "background:#E64A19;" : ""}" title="${fIso}">${d}</th>`;
+                  })
+                  .join("")}
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.empleados.length === 0
+                  ? `<tr><td colspan="${daysInMonth + 1}" style="padding:24px;">No hay empleados cargados.</td></tr>`
+                  : STATE.empleados
+                      .map((emp) => {
+                        const rowMap = mapEmpFecha[emp.id_empleado] || {};
+                        return `
+                    <tr>
+                      <td style="position:sticky; left:0; background:var(--superficie); text-align:left; font-weight:700; white-space:nowrap;">
+                        ${emp.id_empleado} - ${emp.nombre.slice(0, 22)}
+                      </td>
+                      ${daysArray
+                        .map((d) => {
+                          const fIso = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+                          const a = rowMap[fIso];
+                          if (!a) return `<td><span style="color:var(--texto-sec); opacity:0.35;">·</span></td>`;
+                          const bg = getShiftColor(a.id_turno, a.es_descanso);
+                          const abbr = a.es_descanso
+                            ? "D"
+                            : a.nombre_turno
+                                .split(" ")
+                                .map((w) => w[0])
+                                .join("")
+                                .slice(0, 3)
+                                .toUpperCase();
+                          return `
+                            <td title="${emp.nombre} | ${fIso}: ${a.nombre_turno} (${a.hora_entrada}-${a.hora_salida})">
+                              <div class="gantt-cell" style="background:${bg}; color:#fff; display:flex; align-items:center; justify-content:center;">
+                                ${abbr}
+                              </div>
+                            </td>
+                          `;
+                        })
+                        .join("")}
+                    </tr>
+                  `;
+                      })
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
   const asigPorFecha = {};
   STATE.asignaciones.forEach((a) => {
     if (STATE.selectedEmployees.has(a.id_empleado)) {
@@ -907,10 +1088,12 @@ function renderAdminAsignacion() {
     const items = asigPorFecha[fechaIso] || [];
     let etiqueta = "";
     let isRest = false;
+    let colorTurno = "";
     if (items.length > 0) {
       const nombres = [...new Set(items.map((x) => x.nombre_turno))];
       etiqueta = nombres.length === 1 ? nombres[0] : `Varios (${items.length})`;
       isRest = nombres.length === 1 && nombres[0] === "DESCANSO";
+      colorTurno = getShiftColor(items[0].id_turno, isRest);
       if (STATE.selectedEmployees.size > 1) {
         etiqueta += ` [${items.length}/${STATE.selectedEmployees.size}]`;
       }
@@ -919,9 +1102,15 @@ function renderAdminAsignacion() {
       <div class="cal-day ${isSelected ? "selected" : ""} ${isHoliday ? "holiday" : ""}" data-date="${fechaIso}">
         <div class="cal-day-num">
           <span>${d}</span>
-          ${isHoliday ? '<span title="Festivo" style="color:var(--naranja); font-size:0.72rem;">★</span>' : ""}
+          ${isHoliday ? '<span title="Festivo" style="color:var(--naranja); font-size:0.75rem;">★ Festivo</span>' : ""}
         </div>
-        ${etiqueta ? `<div class="cal-day-shift ${isRest ? "rest" : ""}">${etiqueta}</div>` : ""}
+        ${
+          etiqueta
+            ? `<div class="cal-day-shift ${isRest ? "rest" : ""}" style="${
+                !isRest && colorTurno ? `background:${colorTurno}; color:#fff;` : ""
+              }">${etiqueta}</div>`
+            : ""
+        }
       </div>
     `);
   }
@@ -932,6 +1121,7 @@ function renderAdminAsignacion() {
   );
 
   return `
+    ${modeSwitcher}
     <div class="grid-2" style="grid-template-columns: 360px 1fr;">
       <div class="card">
         <div class="card-header">
@@ -969,11 +1159,8 @@ function renderAdminAsignacion() {
       <div>
         <div class="card">
           <div class="card-header">
-            <div class="card-title">2. Seleccione Días en el Calendario (${STATE.selectedDates.size} días marcados en azul)</div>
-            <div style="display:flex; gap:8px; align-items:center;">
-              <input type="month" id="cal-month-picker" class="form-control" value="${STATE.calMonth}" style="width:170px;" />
-              <button type="button" id="btn-clear-dates" class="btn btn-outline btn-sm">Limpiar Días</button>
-            </div>
+            <div class="card-title">2. Seleccione Días en el Calendario (${STATE.selectedDates.size} días seleccionados)</div>
+            <button type="button" id="btn-clear-dates" class="btn btn-outline btn-sm">Limpiar Selección</button>
           </div>
 
           <div class="calendar-grid">
@@ -1041,11 +1228,11 @@ function renderAdminAsignacion() {
           </div>
           <div class="form-group">
             <label class="form-label">Días de la Semana a Aplicar</label>
-            <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:4px;">
+            <div style="display:flex; gap:14px; flex-wrap:wrap; margin-top:4px;">
               ${["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
                 .map(
                   (d, idx) => `
-                <label style="display:flex; align-items:center; gap:5px; font-weight:600; cursor:pointer;">
+                <label style="display:flex; align-items:center; gap:5px; font-weight:700; cursor:pointer;">
                   <input type="checkbox" class="pat-weekday" value="${idx}" ${idx < 5 ? "checked" : ""} /> ${d}
                 </label>
               `
@@ -1062,36 +1249,58 @@ function renderAdminAsignacion() {
   `;
 }
 
-// --- VISTA 4: PROCESAR HUELLERO ---
+// --- VISTA 4: PROCESAR HUELLERO CON DRAG & DROP Y VISTA PREVIA ---
 function renderAdminProcesar() {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
+  const prev = STATE.huelleroPreview;
 
   return `
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Paso 4: Procesar Excel del Huellero + Marcaciones Móviles</div>
+          <div class="card-title">Paso 4: Zona Drag & Drop de Huellero + Vista Previa</div>
         </div>
         <form id="form-procesar-huellero">
-          <div class="form-group">
-            <label class="form-label">Archivos Excel del Reloj Biométrico (.xlsx / .xls)</label>
-            <input type="file" id="proc-files" class="form-control" accept=".xlsx,.xls" multiple />
-            <small style="color:var(--texto-sec); font-size:0.78rem;">
-              Puede subir uno o varios archivos Excel del huellero, o dejar vacío para liquidar con las marcaciones de la App Móvil.
-            </small>
+          <div id="huellero-dropzone" class="dropzone-box">
+            <div style="font-size:2.2rem; margin-bottom:6px;">📂</div>
+            <div style="font-weight:800; font-size:1rem; color:var(--petroleo);">
+              Arrastra y suelta aquí los archivos Excel del Huellero (.xlsx / .xls)
+            </div>
+            <div style="font-size:0.84rem; color:var(--texto-sec); margin-top:4px;">
+              o haz clic para examinar en tu dispositivo (se previsualizarán al instante)
+            </div>
+            <input type="file" id="proc-files" accept=".xlsx,.xls" multiple style="display:none;" />
           </div>
+
+          ${
+            prev
+              ? `
+            <div class="alert-banner alert-ok" style="flex-direction:column; align-items:flex-start;">
+              <div>
+                <strong>✅ Vista Previa Detectada:</strong> ${prev.total_marcaciones} marcaciones válidas de <strong>${prev.total_empleados} empleados</strong> (${prev.fecha_min || "—"} al ${prev.fecha_max || "—"}).
+              </div>
+              <div style="font-size:0.8rem; width:100%; max-height:130px; overflow-y:auto; margin-top:6px; background:var(--superficie); padding:8px; border-radius:8px;">
+                ${prev.muestra
+                  .slice(0, 8)
+                  .map((r) => `<div>• <strong>${r.id_empleado}</strong> (${r.nombre}) — ${r.fecha} a las ${r.hora}</div>`)
+                  .join("")}
+              </div>
+            </div>
+          `
+              : ""
+          }
 
           <div class="grid-2">
             <div class="form-group">
               <label class="form-label">Fecha Inicio del Período</label>
-              <input type="date" id="proc-inicio" class="form-control" value="${y}-${m}-01" required />
+              <input type="date" id="proc-inicio" class="form-control" value="${prev?.fecha_min || `${y}-${m}-01`}" required />
             </div>
             <div class="form-group">
               <label class="form-label">Fecha Fin del Período (máx 31 días)</label>
-              <input type="date" id="proc-fin" class="form-control" value="${y}-${m}-${String(lastDay).padStart(2, "0")}" required />
+              <input type="date" id="proc-fin" class="form-control" value="${prev?.fecha_max || `${y}-${m}-${String(lastDay).padStart(2, "0")}`}" required />
             </div>
           </div>
 
@@ -1122,14 +1331,14 @@ function renderAdminProcesar() {
           </div>
 
           <button type="submit" id="btn-submit-procesar" class="btn btn-action btn-block" style="padding:14px; font-size:1rem;">
-            ⚙️ Procesar Huellero y Generar Reportes Corporativos Excel
+            ⚙️ Liquidar Nómina y Generar Reportes Corporativos Excel
           </button>
         </form>
       </div>
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📥 Reportes Excel Generados (${STATE.reportes.length})</div>
+          <div class="card-title">📥 Reportes Excel Corporativos Listos (${STATE.reportes.length})</div>
         </div>
         <div class="table-responsive">
           <table>
@@ -1168,7 +1377,7 @@ function renderAdminProcesar() {
   `;
 }
 
-// --- VISTA 5: ANÁLISIS Y MÉTRICAS ---
+// --- VISTA 5: ANÁLISIS, GRÁFICAS INTERACTIVAS Y HOJA DE TURNOS IMPRIMIBLE PDF ---
 function renderAdminAnalisis() {
   const { kpis, filas, turnos_disponibles } = STATE.analisisData;
   const f = STATE.analisisFiltros;
@@ -1181,7 +1390,7 @@ function renderAdminAnalisis() {
   ];
 
   return `
-    <div class="grid-4" style="margin-bottom:18px;">
+    <div class="grid-4 no-print" style="margin-bottom:18px;">
       ${kpiCards
         .map(
           (k) => `
@@ -1194,13 +1403,40 @@ function renderAdminAnalisis() {
         .join("")}
     </div>
 
-    <div class="card">
+    <div class="grid-2 no-print" style="margin-bottom:18px;">
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">📊 Desglose de Horas Extra y Recargos (ED, EN, EF, END, RN, RND, RF)</div>
+        </div>
+        <div style="height:230px; position:relative;">
+          <canvas id="chart-recargos"></canvas>
+        </div>
+      </div>
+      <div class="card" style="margin-bottom:0;">
+        <div class="card-header">
+          <div class="card-title">🎯 Distribución de Estados de Jornada</div>
+        </div>
+        <div style="height:230px; position:relative;">
+          <canvas id="chart-estados"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <div class="card no-print">
       <div class="card-header">
-        <div class="card-title">Filtros de Análisis y Exportación</div>
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <button type="button" class="btn ${STATE.analisisTab === "tabla" ? "btn-primary" : "btn-outline"} btn-sm" data-ana-tab="tabla">
+            📋 Tabla Detallada de Novedades
+          </button>
+          <button type="button" class="btn ${STATE.analisisTab === "hoja_imprimible" ? "btn-primary" : "btn-outline"} btn-sm" data-ana-tab="hoja_imprimible">
+            🖨️ Vista Previa Hoja de Turnos (Imprimir / Guardar PDF)
+          </button>
+        </div>
         <button type="button" id="btn-exportar-novedades" class="btn btn-action btn-sm">
           📊 Exportar Reporte de Novedades (6 Pestañas Excel)
         </button>
       </div>
+
       <div class="grid-4" style="align-items:end;">
         <div class="form-group" style="margin-bottom:0;">
           <label class="form-label">Empleado</label>
@@ -1239,6 +1475,12 @@ function renderAdminAnalisis() {
       </div>
     </div>
 
+    ${STATE.analisisTab === "hoja_imprimible" ? renderHojaTurnosImprimible(filas) : renderTablaAnalisis(filas)}
+  `;
+}
+
+function renderTablaAnalisis(filas) {
+  return `
     <div class="card">
       <div class="card-header">
         <div class="card-title">Detalle de Jornadas, Recargos (ED, EN, EF, END, RN, RND, RF) y Novedades (${filas.length} registros)</div>
@@ -1280,7 +1522,7 @@ function renderAdminAnalisis() {
                       <td>${row.hora_salida_teorica || "—"}</td>
                       <td>${row.hora_salida_real || "—"}</td>
                       <td><strong>${Number(row.horas_extra).toFixed(2)}</strong></td>
-                      <td><span style="font-size:0.8rem; color:var(--petroleo); font-weight:600;">${row.desglose}</span></td>
+                      <td><span style="font-size:0.8rem; color:var(--petroleo); font-weight:700;">${row.desglose}</span></td>
                       <td>${row.minutos_tardanza > 0 ? `${row.minutos_tardanza} min` : "0"}</td>
                       <td><span class="badge ${badgeClass}">${row.estado}</span></td>
                     </tr>
@@ -1295,20 +1537,195 @@ function renderAdminAnalisis() {
   `;
 }
 
-// --- VISTA 6: GESTIÓN DE EMPLEADOS Y SUBIDA DE EXCEL ---
+function renderHojaTurnosImprimible(filas) {
+  const empId =
+    STATE.analisisFiltros.id_empleado !== "TODOS"
+      ? STATE.analisisFiltros.id_empleado
+      : STATE.hojaEmpleadoId || STATE.empleados[0]?.id_empleado || "";
+  const empObj = STATE.empleados.find((e) => e.id_empleado === empId) || {
+    id_empleado: empId,
+    nombre: "SELECCIONE UN EMPLEADO"
+  };
+  const filasEmp = filas.filter((r) => String(r.id_empleado) === String(empId));
+
+  const totales = { ED: 0, EN: 0, EF: 0, END: 0, RN: 0, RND: 0, RF: 0 };
+  filasEmp.forEach((r) => {
+    for (const k of Object.keys(totales)) {
+      totales[k] += Number(r[k] || 0);
+    }
+  });
+  const totalExtras = totales.ED + totales.EN + totales.EF + totales.END;
+
+  return `
+    <div class="card no-print" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <label style="font-weight:700;">Empleado para Hoja Individual:</label>
+        <select id="hoja-emp-select" class="form-control" style="width:320px;">
+          ${STATE.empleados
+            .map(
+              (e) => `<option value="${e.id_empleado}" ${e.id_empleado === empId ? "selected" : ""}>${e.id_empleado} - ${e.nombre}</option>`
+            )
+            .join("")}
+        </select>
+      </div>
+      <button type="button" id="btn-print-sheet" class="btn btn-primary">
+        🖨️ Imprimir / Guardar como PDF
+      </button>
+    </div>
+
+    <div class="printable-sheet">
+      <div style="display:flex; align-items:center; justify-content:space-between; border-bottom:3px solid #005A66; padding-bottom:14px; margin-bottom:16px;">
+        <img src="/api/branding/logo" alt="Sterinova" style="max-height:55px;" onerror="this.style.display='none'" />
+        <div style="text-align:right;">
+          <div style="font-size:1.2rem; font-weight:800; color:#005A66;">HOJA DE TURNOS Y LIQUIDACIÓN DE HORAS</div>
+          <div style="font-size:0.86rem; color:#475569;">Formato Corporativo Sterinova</div>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:space-between; margin-bottom:14px; font-size:0.92rem;">
+        <div><strong>TRABAJADOR:</strong> ${empObj.nombre}</div>
+        <div><strong>ID / CÓDIGO:</strong> ${empObj.id_empleado}</div>
+        <div><strong>TOTAL HORAS EXTRAS:</strong> ${totalExtras.toFixed(2)} h</div>
+      </div>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Hora Entrada</th>
+            <th>Hora Salida</th>
+            <th>E.D</th>
+            <th>E.N</th>
+            <th>E.F</th>
+            <th>E.N.D</th>
+            <th>R.N</th>
+            <th>R.N.D</th>
+            <th>Observaciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${
+            filasEmp.length === 0
+              ? `<tr><td colspan="10" style="padding:20px;">Sin registros para este trabajador en el período filtrado.</td></tr>`
+              : filasEmp
+                  .map(
+                    (r) => `
+              <tr>
+                <td><strong>${r.fecha}</strong></td>
+                <td>${r.hora_entrada_real || r.hora_entrada_teorica || ""}</td>
+                <td>${r.hora_salida_real || r.hora_salida_teorica || ""}</td>
+                <td>${Number(r.ED).toFixed(2)}</td>
+                <td>${Number(r.EN).toFixed(2)}</td>
+                <td>${Number(r.EF).toFixed(2)}</td>
+                <td>${Number(r.END).toFixed(2)}</td>
+                <td>${Number(r.RN).toFixed(2)}</td>
+                <td>${Number(r.RND).toFixed(2)}</td>
+                <td style="text-align:left;">${r.observaciones || r.estado}</td>
+              </tr>
+            `
+                  )
+                  .join("")
+          }
+        </tbody>
+      </table>
+
+      <div style="margin-top:14px; padding:10px 14px; background:#E8F0F1; border:1px solid #005A66; font-weight:800; font-size:0.84rem; color:#005A66;">
+        RESUMEN DE HORAS | E.D: ${totales.ED.toFixed(2)} | E.N: ${totales.EN.toFixed(2)} | E.F: ${totales.EF.toFixed(2)} | E.N.D: ${totales.END.toFixed(2)} | R.N: ${totales.RN.toFixed(2)} | R.N.D: ${totales.RND.toFixed(2)} | R.F: ${totales.RF.toFixed(2)}
+      </div>
+    </div>
+  `;
+}
+
+// --- INICIALIZACIÓN DE GRÁFICAS CHART.JS ---
+function initAnalisisCharts() {
+  if (typeof Chart === "undefined") return;
+  const filas = STATE.analisisData?.filas || [];
+
+  const totals = { ED: 0, EN: 0, EF: 0, END: 0, RN: 0, RND: 0, RF: 0 };
+  const estadosCount = { OK: 0, TARDANZA: 0, AUSENCIA: 0, DESCANSO: 0, OTROS: 0 };
+
+  filas.forEach((r) => {
+    for (const k of Object.keys(totals)) {
+      totals[k] += Number(r[k] || 0);
+    }
+    const est = String(r.estado || "").toUpperCase();
+    if (est.includes("AUSENCIA")) estadosCount.AUSENCIA++;
+    else if (est.includes("TARDANZA")) estadosCount.TARDANZA++;
+    else if (est.includes("DESCANSO") || r.turno === "DESCANSO") estadosCount.DESCANSO++;
+    else if (est === "OK") estadosCount.OK++;
+    else estadosCount.OTROS++;
+  });
+
+  const ctxRec = document.getElementById("chart-recargos");
+  if (ctxRec) {
+    if (chartRecargosInstance) chartRecargosInstance.destroy();
+    chartRecargosInstance = new Chart(ctxRec, {
+      type: "bar",
+      data: {
+        labels: ["E.D", "E.N", "E.F", "E.N.D", "R.N", "R.N.D", "R.F"],
+        datasets: [
+          {
+            label: "Horas Acumuladas",
+            data: Object.values(totals).map((v) => Number(v.toFixed(2))),
+            backgroundColor: ["#005A66", "#0284C7", "#E64A19", "#7C3AED", "#0D9488", "#D97706", "#2563EB"],
+            borderRadius: 8
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { display: false } }
+      }
+    });
+  }
+
+  const ctxEst = document.getElementById("chart-estados");
+  if (ctxEst) {
+    if (chartEstadosInstance) chartEstadosInstance.destroy();
+    chartEstadosInstance = new Chart(ctxEst, {
+      type: "doughnut",
+      data: {
+        labels: ["Cumplidos (OK)", "Tardanzas", "Ausencias", "Descansos", "Otros"],
+        datasets: [
+          {
+            data: [
+              estadosCount.OK,
+              estadosCount.TARDANZA,
+              estadosCount.AUSENCIA,
+              estadosCount.DESCANSO,
+              estadosCount.OTROS
+            ],
+            backgroundColor: ["#10B981", "#F59E0B", "#EF4444", "#0284C7", "#64748B"]
+          }
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { position: "right" } }
+      }
+    });
+  }
+}
+
+// --- VISTA 6: EMPLEADOS Y SUBIDA DE EXCEL ---
 function renderAdminEmpleados() {
   return `
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📥 Subir Excel con los Empleados (Huellero o Listado)</div>
+          <div class="card-title">📥 Subir Excel con los Empleados (Drag & Drop)</div>
         </div>
-        <p style="font-size:0.9rem; color:var(--texto-sec); margin-bottom:14px;">
-          Sube el archivo Excel del reloj biométrico o un listado con columnas <strong>ID_Empleado</strong> (Columna A) y <strong>Nombre</strong> (Columna B). A cada empleado se le habilitará su acceso móvil (PIN por defecto: <code>1234</code> o últimos 4 dígitos).
-        </p>
-        <div class="form-group">
-          <label class="form-label">Seleccionar archivo Excel (.xlsx / .xls)</label>
-          <input type="file" id="import-emp-excel" class="form-control" accept=".xlsx,.xls" />
+        <div id="emp-dropzone" class="dropzone-box">
+          <div style="font-size:2rem; margin-bottom:6px;">👥</div>
+          <div style="font-weight:800; color:var(--petroleo);">
+            Arrastra aquí el Excel de Empleados o del Huellero (.xlsx / .xls)
+          </div>
+          <div style="font-size:0.82rem; color:var(--texto-sec); margin-top:4px;">
+            Lee automáticamente ID_Empleado (Columna A) y Nombre (Columna B)
+          </div>
+          <input type="file" id="import-emp-excel" accept=".xlsx,.xls" style="display:none;" />
         </div>
       </div>
 
@@ -1360,7 +1777,7 @@ function renderAdminEmpleados() {
           <tbody>
             ${
               STATE.empleados.length === 0
-                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay empleados cargados. Sube el archivo Excel arriba o registra uno manualmente.</td></tr>`
+                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay empleados cargados. Arrastra el archivo Excel arriba o registra uno manualmente.</td></tr>`
                 : STATE.empleados
                     .map(
                       (e) => `
@@ -1385,20 +1802,23 @@ function renderAdminEmpleados() {
   `;
 }
 
-// --- VISTA 7: MONITOREO GPS (DIRECCIÓN + COORDENADAS) Y SOLICITUDES ---
+// --- VISTA 7: MAPA INTERACTIVO LEAFLET GPS, FOTOS SELFIE Y SOLICITUDES ---
 function renderGpsYSolicitudes() {
   return `
     <div class="card">
       <div class="card-header">
-        <div class="card-title">📍 Marcaciones Móviles GPS con Dirección y Coordenadas (${STATE.marcacionesMoviles.length})</div>
+        <div class="card-title">🗺️ Mapa Interactivo en Vivo de Marcaciones GPS (${STATE.marcacionesMoviles.length})</div>
       </div>
-      <div class="table-responsive" style="max-height:400px;">
+      <div id="gps-leaflet-map" class="gps-map-container"></div>
+
+      <div class="table-responsive" style="max-height:380px;">
         <table>
           <thead>
             <tr>
               <th>Fecha y Hora</th>
               <th>Empleado</th>
               <th>Tipo</th>
+              <th>Evidencia / Nota</th>
               <th>Dirección Física Detectada</th>
               <th>Coordenadas GPS</th>
               <th>Mapa</th>
@@ -1407,7 +1827,7 @@ function renderGpsYSolicitudes() {
           <tbody>
             ${
               STATE.marcacionesMoviles.length === 0
-                ? `<tr><td colspan="6" style="text-align:center; padding:22px;">Aún no hay marcaciones registradas desde celulares.</td></tr>`
+                ? `<tr><td colspan="7" style="text-align:center; padding:22px;">Aún no hay marcaciones registradas desde celulares.</td></tr>`
                 : STATE.marcacionesMoviles
                     .map(
                       (m) => `
@@ -1415,6 +1835,14 @@ function renderGpsYSolicitudes() {
                   <td><strong>${m.fecha_hora}</strong></td>
                   <td><strong>${m.nombre_empleado}</strong><br/><small>ID: ${m.id_empleado}</small></td>
                   <td><span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span></td>
+                  <td>
+                    ${
+                      m.foto_base64
+                        ? `<img src="${m.foto_base64}" alt="Selfie" style="width:44px; height:44px; object-fit:cover; border-radius:8px; border:1px solid var(--borde); display:block; margin-bottom:4px;" />`
+                        : ""
+                    }
+                    <small>${m.observaciones || "—"}</small>
+                  </td>
                   <td><strong>${m.direccion || "Sin dirección registrada"}</strong></td>
                   <td>${
                     m.latitud != null && m.longitud != null
@@ -1424,7 +1852,7 @@ function renderGpsYSolicitudes() {
                   <td>
                     ${
                       m.latitud != null && m.longitud != null
-                        ? `<a href="https://www.google.com/maps?q=${m.latitud},${m.longitud}" target="_blank" class="btn btn-outline btn-sm">🗺️ Ver Mapa</a>`
+                        ? `<a href="https://www.google.com/maps?q=${m.latitud},${m.longitud}" target="_blank" class="btn btn-outline btn-sm">🗺️ Google Maps</a>`
                         : "—"
                     }
                   </td>
@@ -1495,11 +1923,47 @@ function renderGpsYSolicitudes() {
   `;
 }
 
+function initGpsLeafletMap() {
+  if (typeof L === "undefined") return;
+  const container = document.getElementById("gps-leaflet-map");
+  if (!container) return;
+  if (leafletMapInstance) {
+    leafletMapInstance.remove();
+    leafletMapInstance = null;
+  }
+
+  // Coordenada inicial por defecto (Bogotá, Colombia)
+  let center = [4.6533, -74.0836];
+  const validMarks = STATE.marcacionesMoviles.filter((m) => m.latitud != null && m.longitud != null);
+  if (validMarks.length > 0) {
+    center = [Number(validMarks[0].latitud), Number(validMarks[0].longitud)];
+  }
+
+  leafletMapInstance = L.map("gps-leaflet-map").setView(center, validMarks.length > 0 ? 14 : 6);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    attribution: "© OpenStreetMap contributors"
+  }).addTo(leafletMapInstance);
+
+  validMarks.forEach((m) => {
+    const marker = L.marker([Number(m.latitud), Number(m.longitud)]).addTo(leafletMapInstance);
+    marker.bindPopup(`
+      <div style="font-size:0.84rem;">
+        <strong>${m.nombre_empleado} (ID: ${m.id_empleado})</strong><br/>
+        <span style="color:#005A66; font-weight:700;">${m.tipo}</span> — ${m.fecha_hora}<br/>
+        🏠 ${m.direccion || "Sin dirección"}<br/>
+        📍 <code>${m.latitud}, ${m.longitud}</code>
+      </div>
+    `);
+  });
+}
+
 // ============================================================================
 // EVENTOS DE GESTIÓN (SUPERADMIN, ADMIN, SUPERVISOR)
 // ============================================================================
 
 function bindManagementEvents() {
+  document.getElementById("btn-toggle-theme")?.addEventListener("click", toggleDarkMode);
+
   document.querySelectorAll("[data-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
       STATE.activeView = btn.dataset.view;
@@ -1564,7 +2028,7 @@ function bindManagementEvents() {
         document.getElementById("usr-username").value = u.username;
         document.getElementById("usr-nombre").value = u.nombre;
         document.getElementById("usr-rol").value = u.rol;
-        document.getElementById("usr-password").placeholder = "Nueva contraseña (o repetir actual)";
+        document.getElementById("usr-password").placeholder = "Nueva contraseña";
       });
     });
 
@@ -1698,7 +2162,14 @@ function bindManagementEvents() {
     });
   }
 
-  // --- Eventos Asignación de Turnos ---
+  // --- Eventos Asignación de Turnos & Matriz Gantt ---
+  document.querySelectorAll("[data-asig-mode]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.asignacionModoVista = btn.dataset.asigMode;
+      renderApp();
+    });
+  });
+
   const calPicker = document.getElementById("cal-month-picker");
   if (calPicker) {
     calPicker.addEventListener("change", async () => {
@@ -1826,7 +2297,51 @@ function bindManagementEvents() {
     });
   }
 
-  // --- Eventos Procesar Huellero ---
+  // --- Eventos Procesar Huellero (Drag & Drop + Previsualización) ---
+  const dropzone = document.getElementById("huellero-dropzone");
+  const fileInput = document.getElementById("proc-files");
+  if (dropzone && fileInput) {
+    const handleHuelleroFiles = async (fileList) => {
+      if (!fileList || fileList.length === 0) return;
+      try {
+        showToast("Analizando vista previa del Excel...", "info");
+        const archivos = [];
+        for (const f of fileList) {
+          const b64 = await fileToBase64(f);
+          archivos.push({ filename: f.name, content_base64: b64 });
+        }
+        STATE.huelleroFiles = archivos;
+        const prev = await apiFetch("/api/previsualizar-huellero", {
+          method: "POST",
+          body: JSON.stringify({
+            archivos,
+            columna_id: document.getElementById("proc-col-id")?.value || "ID_Empleado",
+            columna_fecha: document.getElementById("proc-col-fecha")?.value || "Fecha",
+            columna_hora: document.getElementById("proc-col-hora")?.value || "Hora"
+          })
+        });
+        STATE.huelleroPreview = prev;
+        showToast(`Vista previa lista: ${prev.total_marcaciones} marcaciones detectadas`, "success");
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    };
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("dragover");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("dragover");
+      handleHuelleroFiles(e.dataTransfer.files);
+    });
+    fileInput.addEventListener("change", (e) => handleHuelleroFiles(e.target.files));
+  }
+
   const formProc = document.getElementById("form-procesar-huellero");
   if (formProc) {
     formProc.addEventListener("submit", async (e) => {
@@ -1835,14 +2350,8 @@ function bindManagementEvents() {
       try {
         btn.disabled = true;
         btn.textContent = "⏳ Procesando marcaciones y generando reportes Excel...";
-        const inputFiles = document.getElementById("proc-files").files;
-        const archivos = [];
-        for (const f of inputFiles) {
-          const b64 = await fileToBase64(f);
-          archivos.push({ filename: f.name, content_base64: b64 });
-        }
         const payload = {
-          archivos,
+          archivos: STATE.huelleroFiles || [],
           fecha_inicio: document.getElementById("proc-inicio").value,
           fecha_fin: document.getElementById("proc-fin").value,
           columna_id: document.getElementById("proc-col-id").value,
@@ -1861,12 +2370,28 @@ function bindManagementEvents() {
       } catch (err) {
         showToast(err.message, "error");
         btn.disabled = false;
-        btn.textContent = "⚙️ Procesar Huellero y Generar Reportes Corporativos Excel";
+        btn.textContent = "⚙️ Liquidar Nómina y Generar Reportes Corporativos Excel";
       }
     });
   }
 
-  // --- Eventos Análisis y Métricas ---
+  // --- Eventos Análisis, Gráficas y Hoja Imprimible ---
+  document.querySelectorAll("[data-ana-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.analisisTab = btn.dataset.anaTab;
+      renderApp();
+    });
+  });
+
+  document.getElementById("hoja-emp-select")?.addEventListener("change", (e) => {
+    STATE.hojaEmpleadoId = e.target.value;
+    renderApp();
+  });
+
+  document.getElementById("btn-print-sheet")?.addEventListener("click", () => {
+    window.print();
+  });
+
   document.querySelectorAll("[data-kpi]").forEach((card) => {
     card.addEventListener("click", async () => {
       const key = card.dataset.kpi;
@@ -1899,7 +2424,42 @@ function bindManagementEvents() {
     }
   });
 
-  // --- Eventos Empleados ---
+  // --- Eventos Empleados (Drag & Drop Excel) ---
+  const empDrop = document.getElementById("emp-dropzone");
+  const empInput = document.getElementById("import-emp-excel");
+  if (empDrop && empInput) {
+    const uploadEmpExcel = async (file) => {
+      if (!file) return;
+      try {
+        const b64 = await fileToBase64(file);
+        const res = await apiFetch("/api/empleados/importar-excel", {
+          method: "POST",
+          body: JSON.stringify({ filename: file.name, content_base64: b64 })
+        });
+        showToast(`¡Se importaron ${res.importados} empleados desde el Excel!`, "success");
+        await Promise.all([loadEmpleados(), loadDashboard()]);
+        if (STATE.empleados.length > 0 && STATE.selectedEmployees.size === 0) {
+          STATE.selectedEmployees.add(STATE.empleados[0].id_empleado);
+        }
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    };
+    empDrop.addEventListener("click", () => empInput.click());
+    empDrop.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      empDrop.classList.add("dragover");
+    });
+    empDrop.addEventListener("dragleave", () => empDrop.classList.remove("dragover"));
+    empDrop.addEventListener("drop", (e) => {
+      e.preventDefault();
+      empDrop.classList.remove("dragover");
+      uploadEmpExcel(e.dataTransfer.files?.[0]);
+    });
+    empInput.addEventListener("change", (e) => uploadEmpExcel(e.target.files?.[0]));
+  }
+
   const formEmp = document.getElementById("form-empleado");
   if (formEmp) {
     formEmp.addEventListener("submit", async (e) => {
@@ -1916,26 +2476,6 @@ function bindManagementEvents() {
         });
         showToast("Empleado guardado", "success");
         await Promise.all([loadEmpleados(), loadDashboard()]);
-        renderApp();
-      } catch (err) {
-        showToast(err.message, "error");
-      }
-    });
-
-    document.getElementById("import-emp-excel")?.addEventListener("change", async (e) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      try {
-        const b64 = await fileToBase64(file);
-        const res = await apiFetch("/api/empleados/importar-excel", {
-          method: "POST",
-          body: JSON.stringify({ filename: file.name, content_base64: b64 })
-        });
-        showToast(`¡Se importaron ${res.importados} empleados desde el Excel!`, "success");
-        await Promise.all([loadEmpleados(), loadDashboard()]);
-        if (STATE.empleados.length > 0 && STATE.selectedEmployees.size === 0) {
-          STATE.selectedEmployees.add(STATE.empleados[0].id_empleado);
-        }
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
@@ -1991,11 +2531,11 @@ function bindManagementEvents() {
 }
 
 // ============================================================================
-// PORTAL / APP MÓVIL DEL EMPLEADO
+// PORTAL / APP MÓVIL DEL EMPLEADO (CON SELFIE CAMERA + GPS + DIRECCIÓN)
 // ============================================================================
 
 const EMP_NAV = [
-  { id: "emp_reloj", icon: "⏱️", label: "Reloj & Turno Hoy", short: "Marcar" },
+  { id: "emp_reloj", icon: "⏱️", label: "Reloj GPS & Selfie", short: "Marcar" },
   { id: "emp_turnos", icon: "🗓️", label: "Mis Turnos", short: "Mis Turnos" },
   { id: "emp_horas", icon: "💰", label: "Horas Extra y Recargos", short: "Mis Horas" },
   { id: "emp_permisos", icon: "📝", label: "Solicitar Permiso", short: "Permisos" }
@@ -2041,8 +2581,11 @@ function renderEmpleadoLayout() {
             <div style="font-size:0.78rem; color:var(--texto-sec);">${STATE.user.nombre} (ID: ${STATE.user.id})</div>
           </div>
           <div style="display:flex; gap:8px; align-items:center;">
+            <button type="button" id="btn-emp-theme" class="btn btn-outline btn-sm">
+              ${STATE.darkMode ? "☀️" : "🌙"}
+            </button>
             <span class="badge badge-info">📱 Empleado</span>
-            <button type="button" id="btn-emp-top-logout" class="btn btn-danger btn-sm">Cerrar Sesión</button>
+            <button type="button" id="btn-emp-top-logout" class="btn btn-danger btn-sm">Salir</button>
           </div>
         </header>
 
@@ -2093,13 +2636,50 @@ function renderEmpleadoViewContent() {
         </div>
         <div class="clock-time" id="live-clock-time">${timeStr}</div>
         <div class="clock-date">${dateStr}</div>
-        <div id="gps-status-badge" style="font-size:0.83rem; margin-bottom:16px; opacity:0.95; line-height:1.5;">
+        <div id="gps-status-badge" style="font-size:0.83rem; margin-bottom:14px; opacity:0.95; line-height:1.5;">
           ${
             STATE.gpsActual
               ? `📍 <strong>Coordenadas:</strong> ${STATE.gpsActual.latitud}, ${STATE.gpsActual.longitud} (±${STATE.gpsActual.precision_m}m)<br/>🏠 <strong>Dirección:</strong> ${STATE.gpsActual.direccion || "Calculando..."}`
               : "📍 Obteniendo coordenadas GPS y dirección física..."
           }
         </div>
+
+        <!-- Cámara Selfie opcional y nota rápida -->
+        <div style="max-width:440px; margin:0 auto 14px;">
+          ${
+            STATE.selfieBase64
+              ? `
+            <div class="camera-preview-box">
+              <img src="${STATE.selfieBase64}" alt="Selfie capturada" />
+            </div>
+            <button type="button" id="btn-clear-selfie" class="btn btn-outline btn-sm" style="margin-bottom:10px; background:rgba(255,255,255,0.15); color:#fff; border-color:#fff;">
+              🔄 Tomar otra foto
+            </button>
+          `
+              : `
+            <div id="camera-container" class="camera-preview-box" style="display:none;">
+              <video id="camera-video" autoplay playsinline></video>
+            </div>
+            <div style="display:flex; justify-content:center; gap:8px; margin-bottom:10px;">
+              <button type="button" id="btn-toggle-camera" class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15); color:#fff; border-color:rgba(255,255,255,0.5);">
+                📷 Activar Cámara Selfie (Opcional)
+              </button>
+              <button type="button" id="btn-snap-selfie" class="btn btn-action btn-sm" style="display:none;">
+                📸 Capturar Foto
+              </button>
+            </div>
+          `
+          }
+          <input
+            type="text"
+            id="emp-nota-marcacion"
+            class="form-control"
+            placeholder="Nota opcional (ej: Ingreso turno mañana / Visita planta)"
+            value="${STATE.notaMarcacion}"
+            style="background:rgba(255,255,255,0.92); color:#0F172A; font-size:0.86rem;"
+          />
+        </div>
+
         <div class="clock-actions">
           <button type="button" class="btn-punch-in" data-punch="ENTRADA">
             🟢 MARCAR ENTRADA
@@ -2139,7 +2719,7 @@ function renderEmpleadoViewContent() {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📲 Mis Últimas Marcaciones (Dirección y Coordenadas) (${r.marcaciones_moviles.length})</div>
+          <div class="card-title">📲 Mis Últimas Marcaciones (Dirección, Coordenadas y Selfie) (${r.marcaciones_moviles.length})</div>
         </div>
         <div class="table-responsive">
           <table>
@@ -2147,6 +2727,7 @@ function renderEmpleadoViewContent() {
               <tr>
                 <th>Fecha y Hora</th>
                 <th>Tipo</th>
+                <th>Foto / Nota</th>
                 <th>Dirección Física</th>
                 <th>Coordenadas GPS</th>
               </tr>
@@ -2154,7 +2735,7 @@ function renderEmpleadoViewContent() {
             <tbody>
               ${
                 r.marcaciones_moviles.length === 0
-                  ? `<tr><td colspan="4" style="text-align:center; padding:18px;">Pulsa "Marcar Entrada" o "Marcar Salida" arriba para registrar tu asistencia con dirección y coordenadas.</td></tr>`
+                  ? `<tr><td colspan="5" style="text-align:center; padding:18px;">Pulsa "Marcar Entrada" o "Marcar Salida" arriba para registrar tu asistencia con dirección y coordenadas.</td></tr>`
                   : r.marcaciones_moviles
                       .map(
                         (m) => `
@@ -2162,6 +2743,14 @@ function renderEmpleadoViewContent() {
                     <td><strong>${m.fecha_hora}</strong></td>
                     <td>
                       <span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span>
+                    </td>
+                    <td>
+                      ${
+                        m.foto_base64
+                          ? `<img src="${m.foto_base64}" alt="Selfie" style="width:38px; height:38px; border-radius:6px; object-fit:cover; display:block;" />`
+                          : ""
+                      }
+                      <small>${m.observaciones || "—"}</small>
                     </td>
                     <td><strong>${m.direccion || "Sin dirección"}</strong></td>
                     <td>${
@@ -2369,8 +2958,11 @@ function renderEmpleadoViewContent() {
 }
 
 function bindEmpleadoEvents() {
+  document.getElementById("btn-emp-theme")?.addEventListener("click", toggleDarkMode);
+
   document.querySelectorAll("[data-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
+      stopCameraStream();
       STATE.activeView = btn.dataset.view;
       renderApp();
     });
@@ -2380,10 +2972,51 @@ function bindEmpleadoEvents() {
   document.getElementById("btn-emp-logout")?.addEventListener("click", logout);
   document.getElementById("btn-emp-top-logout")?.addEventListener("click", logout);
 
+  // --- Eventos Cámara Selfie ---
+  document.getElementById("btn-toggle-camera")?.addEventListener("click", async () => {
+    try {
+      const box = document.getElementById("camera-container");
+      const video = document.getElementById("camera-video");
+      const snapBtn = document.getElementById("btn-snap-selfie");
+      if (!navigator.mediaDevices?.getUserMedia) {
+        showToast("Tu navegador no permite acceso directo a cámara", "error");
+        return;
+      }
+      STATE.cameraStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: { ideal: 360 }, height: { ideal: 280 } },
+        audio: false
+      });
+      video.srcObject = STATE.cameraStream;
+      box.style.display = "block";
+      snapBtn.style.display = "inline-flex";
+    } catch {
+      showToast("No se pudo acceder a la cámara", "error");
+    }
+  });
+
+  document.getElementById("btn-snap-selfie")?.addEventListener("click", () => {
+    const video = document.getElementById("camera-video");
+    if (!video) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 320;
+    canvas.height = 240;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    STATE.selfieBase64 = canvas.toDataURL("image/jpeg", 0.72);
+    stopCameraStream();
+    renderApp();
+  });
+
+  document.getElementById("btn-clear-selfie")?.addEventListener("click", () => {
+    STATE.selfieBase64 = "";
+    renderApp();
+  });
+
   document.querySelectorAll("[data-punch]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       try {
         const tipo = btn.dataset.punch;
+        const nota = document.getElementById("emp-nota-marcacion")?.value || "";
         if (STATE.gpsActual && !STATE.gpsActual.direccion && STATE.gpsActual.latitud != null) {
           STATE.gpsActual.direccion = await resolverDireccionPorCoordenadas(
             STATE.gpsActual.latitud,
@@ -2397,12 +3030,16 @@ function bindEmpleadoEvents() {
           longitud: STATE.gpsActual?.longitud ?? null,
           precision_m: STATE.gpsActual?.precision_m ?? null,
           direccion: STATE.gpsActual?.direccion || "",
+          observaciones: nota,
+          foto_base64: STATE.selfieBase64 || "",
           dispositivo: navigator.userAgent.includes("Mobile") ? "App Celular" : "Navegador Web"
         };
         const res = await apiFetch("/api/empleado/marcar", {
           method: "POST",
           body: JSON.stringify(payload)
         });
+        STATE.selfieBase64 = "";
+        STATE.notaMarcacion = "";
         showToast(
           `¡${tipo} registrada! ${res.direccion ? `Ubicación: ${res.direccion}` : res.fecha_hora}`,
           "success"
