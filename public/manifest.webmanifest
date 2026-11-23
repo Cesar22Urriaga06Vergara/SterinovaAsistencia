@@ -1,0 +1,24 @@
+{
+  "name": "Sterinova — Control de Asistencia y Nómina",
+  "short_name": "Sterinova",
+  "description": "Sistema en línea y App Móvil para control de asistencia, turnos, huellero y portal de empleados.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#003F48",
+  "theme_color": "#005A66",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/api/branding/logo",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/api/branding/logo",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.env.*
+!.env.example
+.venv/
+.venv312/
+node_modules/
+data/uploads_huellero/
+data/reportes_web/
+data/ultimo_detalle.pkl
+data/ultimo_detalle.tmp.pkl
+*.tmp.xlsx
