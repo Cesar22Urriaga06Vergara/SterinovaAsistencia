@@ -789,6 +789,9 @@ function renderManagementLayout() {
             <button type="button" id="btn-toggle-theme" class="icon-btn" title="${STATE.darkMode ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}">
               ${STATE.darkMode ? icon("sun", 17) : icon("moon", 17)}
             </button>
+            <button type="button" id="btn-top-logout" class="icon-btn icon-btn-danger mobile-only-btn" title="Cerrar Sesión">
+              ${icon("log-out", 17)}
+            </button>
           </div>
         </header>
 
@@ -3920,6 +3923,9 @@ function renderEmpleadoLayout() {
             </button>
             <button type="button" id="btn-emp-theme" class="icon-btn" title="${STATE.darkMode ? "Modo claro" : "Modo oscuro"}">
               ${STATE.darkMode ? icon("sun", 17) : icon("moon", 17)}
+            </button>
+            <button type="button" id="btn-emp-top-logout" class="icon-btn icon-btn-danger mobile-only-btn" title="Cerrar Sesión">
+              ${icon("log-out", 17)}
             </button>
           </div>
         </header>

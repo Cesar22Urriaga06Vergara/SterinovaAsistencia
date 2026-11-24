@@ -1444,7 +1444,14 @@ tr:hover td {
   gap: 6px;
 }
 
+.mobile-only-btn {
+  display: none !important;
+}
+
 @media (max-width: 960px) {
+  .mobile-only-btn {
+    display: inline-flex !important;
+  }
   .corp-kpi-strip { grid-template-columns: repeat(2, 1fr); }
   .drawer-panel { max-width: 100%; }
 }
