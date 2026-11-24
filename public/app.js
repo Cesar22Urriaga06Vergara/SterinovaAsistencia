@@ -409,6 +409,20 @@ function obtenerUbicacionGPS() {
 // RENDERIZADO PRINCIPAL
 // ============================================================================
 
+function applyMobileTableLabels() {
+  document.querySelectorAll(".corp-table-card table").forEach((table) => {
+    const headers = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+    if (headers.length === 0) return;
+    table.querySelectorAll("tbody tr").forEach((tr) => {
+      tr.querySelectorAll("td").forEach((td, idx) => {
+        if (!td.hasAttribute("colspan") && headers[idx]) {
+          td.setAttribute("data-label", headers[idx]);
+        }
+      });
+    });
+  });
+}
+
 function renderApp() {
   applyTheme();
   const root = document.getElementById("app");
@@ -424,10 +438,12 @@ function renderApp() {
   if (STATE.user.role === "empleado") {
     root.innerHTML = renderEmpleadoLayout();
     bindEmpleadoEvents();
+    applyMobileTableLabels();
     refreshLucideIcons();
   } else {
     root.innerHTML = renderManagementLayout();
     bindManagementEvents();
+    applyMobileTableLabels();
     refreshLucideIcons();
     setTimeout(() => {
       if (STATE.activeView === "analisis" || STATE.activeView === "dashboard") {
@@ -624,11 +640,12 @@ function getMenuForRole(role) {
 
   if (role === "supervisor") {
     return [
+      { id: "empleados", lucide: "users", label: "Mi Personal", step: "EQUIPO", short: "Personal" },
       { id: "turnos", lucide: "clock", label: "Turnos de Mi Área", step: "PASO 1", short: "Turnos" },
       { id: "asignacion", lucide: "calendar-range", label: "Asignar Turnos & Gantt", step: "PASO 2", short: "Asignar" },
       { id: "procesar", lucide: "file-spreadsheet", label: "Validar Huellero y Reportes", step: "PASO 3", short: "Huellero" },
       { id: "analisis", lucide: "bar-chart-3", label: "Horas Extra y Hoja PDF", step: "PASO 4", short: "Horas Extra" },
-      { id: "gps_solicitudes", lucide: "map-pin", label: "Permisos y Mapa GPS", step: "MI EQUIPO", short: "Permisos/GPS" }
+      { id: "gps_solicitudes", lucide: "map-pin", label: "Permisos y Mapa GPS", step: "PERMISOS", short: "Permisos/GPS" }
     ];
   }
 
@@ -804,8 +821,7 @@ function renderManagementLayout() {
       ${renderActiveDrawer()}
 
       <nav class="bottom-nav">
-        ${navItems
-          .slice(0, 6)
+        ${(navItems.length > 4 ? navItems.slice(0, 3) : navItems)
           .map(
             (item) => `
           <button type="button" class="bottom-nav-item ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
@@ -815,6 +831,16 @@ function renderManagementLayout() {
         `
           )
           .join("")}
+        ${
+          navItems.length > 4
+            ? `
+          <button type="button" class="bottom-nav-item" id="btn-open-mobile-menu">
+            ${icon("menu", 18)}
+            <span>Menú</span>
+          </button>
+        `
+            : ""
+        }
       </nav>
     </div>
   `;
@@ -956,6 +982,7 @@ function renderActiveDrawer() {
 
   if (STATE.activeDrawer === "empleado") {
     const isEdit = Boolean(d.id_empleado);
+    const isSup = STATE.user?.role === "supervisor";
     return `
       <div class="drawer-backdrop" id="drawer-backdrop">
         <div class="drawer-panel">
@@ -975,12 +1002,17 @@ function renderActiveDrawer() {
               </div>
               <div class="form-group">
                 <label class="form-label">Área Asignada</label>
-                <select id="emp-area" class="form-control" required>
-                  <option value="">-- Seleccione Área --</option>
-                  ${STATE.areas
-                    .map((a) => `<option value="${a.id}" ${String(d.id_area || "") === String(a.id) ? "selected" : ""}>${a.nombre}</option>`)
-                    .join("")}
-                </select>
+                ${
+                  isSup
+                    ? `<input type="text" class="form-control" value="${STATE.user.nombre_area || "Mi Área"}" disabled />
+                       <input type="hidden" id="emp-area" value="${STATE.user.id_area || ""}" />`
+                    : `<select id="emp-area" class="form-control" required>
+                        <option value="">-- Seleccione Área --</option>
+                        ${STATE.areas
+                          .map((a) => `<option value="${a.id}" ${String(d.id_area || "") === String(a.id) ? "selected" : ""}>${a.nombre}</option>`)
+                          .join("")}
+                      </select>`
+                }
               </div>
               <div class="grid-2">
                 <div class="form-group">
@@ -1004,6 +1036,7 @@ function renderActiveDrawer() {
   }
 
   if (STATE.activeDrawer === "importar_empleados") {
+    const isSup = STATE.user?.role === "supervisor";
     return `
       <div class="drawer-backdrop" id="drawer-backdrop">
         <div class="drawer-panel">
@@ -1013,14 +1046,19 @@ function renderActiveDrawer() {
           </div>
           <div class="drawer-body">
             <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:14px;">
-              Sube un archivo Excel (.xlsx / .xls) con columnas: <code>ID | Nombre | Área | Cargo | PIN</code>. Esta base de personal es independiente del huellero.
+              Sube un archivo Excel (.xlsx / .xls) con columnas: <code>ID | Nombre | Cargo | PIN</code>${isSup ? ` (todos se asignarán automáticamente a tu área: <strong>${STATE.user.nombre_area}</strong>).` : ` (y opcionalmente <code>Área</code>).`}
             </p>
             <div class="form-group">
-              <label class="form-label">Área por defecto (si el Excel no incluye columna Área)</label>
-              <select id="import-emp-area-default" class="form-control">
-                <option value="">-- Detectar columna Área del Excel --</option>
-                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
-              </select>
+              <label class="form-label">${isSup ? "Área Asignada (Tu Área)" : "Área por defecto (si el Excel no incluye columna Área)"}</label>
+              ${
+                isSup
+                  ? `<input type="text" class="form-control" value="${STATE.user.nombre_area || "Mi Área"}" disabled />
+                     <input type="hidden" id="import-emp-area-default" value="${STATE.user.id_area || ""}" />`
+                  : `<select id="import-emp-area-default" class="form-control">
+                      <option value="">-- Detectar columna Área del Excel --</option>
+                      ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+                    </select>`
+              }
             </div>
             <div id="emp-dropzone" class="dropzone-box" style="padding:28px 18px;">
               <div style="margin-bottom:8px; color:var(--petroleo);">${icon("upload-cloud", 34)}</div>
@@ -1231,6 +1269,40 @@ function renderActiveDrawer() {
               <button type="submit" class="btn btn-primary">${icon("send", 15)} Enviar Solicitud</button>
             </div>
           </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "mobile_menu") {
+    const role = STATE.user?.role || "";
+    const items = role === "empleado" ? EMP_NAV : getMenuForRole(role);
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("menu", 18)} <span>Menú — ${STATE.user?.nombre || "Usuario"}</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <div class="drawer-body">
+            <div class="mobile-menu-list">
+              ${items
+                .map(
+                  (item) => `
+                <button type="button" class="mobile-menu-item ${STATE.activeView === item.id ? "active" : ""}" data-mobile-view="${item.id}">
+                  ${icon(item.lucide || "circle", 18)}
+                  <span>${item.label}</span>
+                </button>
+              `
+                )
+                .join("")}
+            </div>
+          </div>
+          <div class="drawer-footer">
+            <button type="button" id="btn-mobile-drawer-logout" class="btn btn-danger btn-block">
+              ${icon("log-out", 16)} Cerrar Sesión
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -2767,8 +2839,9 @@ function initAnalisisCharts() {
 // ============================================================================
 
 function renderAdminEmpleados() {
+  const isSup = STATE.user?.role === "supervisor";
   const qEmp = (STATE.searchEmpleados || "").toLowerCase();
-  const areaFilter = STATE.filtroAreaEmpleados || "";
+  const areaFilter = isSup ? String(STATE.user.id_area || "") : STATE.filtroAreaEmpleados || "";
   const empleadosFiltrados = STATE.empleados.filter((e) => {
     const matchText =
       e.id_empleado.toLowerCase().includes(qEmp) ||
@@ -2786,15 +2859,19 @@ function renderAdminEmpleados() {
           ${icon("search", 16)}
           <input type="text" id="search-empleados-table" class="form-control" placeholder="Buscar por ID, nombre, cargo..." value="${STATE.searchEmpleados || ""}" />
         </div>
-        <select id="filter-area-empleados" class="form-control" style="width:auto; min-width:190px; height:38px; font-size:0.86rem;">
-          <option value="">Todas las Áreas (${STATE.empleados.length})</option>
-          ${STATE.areas
-            .map(
-              (a) =>
-                `<option value="${a.id}" ${String(areaFilter) === String(a.id) ? "selected" : ""}>${a.nombre} (${a.total_empleados})</option>`
-            )
-            .join("")}
-        </select>
+        ${
+          isSup
+            ? `<span class="badge badge-info" style="height:36px; padding:0 12px; font-size:0.82rem;">${icon("building-2", 14)} Área: ${STATE.user.nombre_area || "Mi Área"} (${empleadosFiltrados.length})</span>`
+            : `<select id="filter-area-empleados" class="form-control" style="width:auto; min-width:190px; height:38px; font-size:0.86rem;">
+                <option value="">Todas las Áreas (${STATE.empleados.length})</option>
+                ${STATE.areas
+                  .map(
+                    (a) =>
+                      `<option value="${a.id}" ${String(areaFilter) === String(a.id) ? "selected" : ""}>${a.nombre} (${a.total_empleados})</option>`
+                  )
+                  .join("")}
+              </select>`
+        }
       </div>
       <div class="corp-toolbar-right">
         <button type="button" id="btn-open-import-emp" class="btn btn-outline btn-sm">
@@ -3100,6 +3177,19 @@ function bindManagementEvents() {
   });
 
   // --- Eventos Drawer / Modal Corporativo Global ---
+  document.getElementById("btn-open-mobile-menu")?.addEventListener("click", () => openDrawer("mobile_menu", null));
+  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", () => {
+    STATE.activeDrawer = null;
+    setUser(null);
+  });
+  document.querySelectorAll("[data-mobile-view]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.activeView = btn.dataset.mobileView;
+      STATE.activeDrawer = null;
+      renderApp();
+    });
+  });
+
   document.getElementById("btn-close-drawer")?.addEventListener("click", closeDrawer);
   document.getElementById("btn-cancel-drawer")?.addEventListener("click", closeDrawer);
   document.getElementById("drawer-backdrop")?.addEventListener("click", (e) => {
@@ -3939,14 +4029,20 @@ function renderEmpleadoLayout() {
       ${renderActiveDrawer()}
 
       <nav class="bottom-nav">
-        ${EMP_NAV.map(
-          (item) => `
+        ${EMP_NAV.slice(0, 3)
+          .map(
+            (item) => `
           <button type="button" class="bottom-nav-item ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
             ${icon(item.lucide, 18)}
             <span>${item.short}</span>
           </button>
         `
-        ).join("")}
+          )
+          .join("")}
+        <button type="button" class="bottom-nav-item" id="btn-emp-mobile-menu">
+          ${icon("menu", 18)}
+          <span>Menú</span>
+        </button>
       </nav>
     </div>
   `;
@@ -4473,6 +4569,19 @@ function bindEmpleadoEvents() {
   });
 
   document.getElementById("btn-open-new-sol")?.addEventListener("click", () => openDrawer("emp_solicitud", null));
+  document.getElementById("btn-emp-mobile-menu")?.addEventListener("click", () => openDrawer("mobile_menu", null));
+  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", () => {
+    STATE.activeDrawer = null;
+    setUser(null);
+  });
+  document.querySelectorAll("[data-mobile-view]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      stopCameraStream();
+      STATE.activeView = btn.dataset.mobileView;
+      STATE.activeDrawer = null;
+      renderApp();
+    });
+  });
   document.getElementById("btn-close-drawer")?.addEventListener("click", closeDrawer);
   document.getElementById("btn-cancel-drawer")?.addEventListener("click", closeDrawer);
   document.getElementById("drawer-backdrop")?.addEventListener("click", (e) => {
