@@ -27,7 +27,7 @@ const SHIFT_COLORS = [
 
 const STATE = {
   user: JSON.parse(localStorage.getItem("sterinova_user") || "null"),
-  darkMode: localStorage.getItem("sterinova_dark") === "true",`r`n  loginMode: "corporativo", // "corporativo" | "colaborador"
+  darkMode: localStorage.getItem("sterinova_dark") === "true",
   activeView: "dashboard",
   deferredInstallPrompt: null,
   // Notificaciones en tiempo real
@@ -85,6 +85,18 @@ const STATE = {
   searchUsuarios: "",
   searchEmpleados: "",
   searchTurnos: "",
+  searchFestivos: "",
+  // Filtros y pestañas corporativas (Superadmin + global)
+  superadminTab: "usuarios", // "usuarios" | "areas"
+  procesarTab: "validar", // "validar" | "reportes"
+  gpsTab: "permisos", // "permisos" | "mapa"
+  rrhhTab: "permisos", // "permisos" | "comunicados"
+  adminEstructuraTab: "supervisores", // "supervisores" | "areas" | "empleados"
+  filtroAreaEmpleados: "",
+  // Drawer / Modal global reutilizable para formularios limpios
+  // Tipos: null | "area" | "usuario" | "empleado" | "importar_empleados" | "festivo" | "turno" | "comunicado"
+  activeDrawer: null,
+  drawerData: null,
   // Estado UI del Login Corporativo
   showPassword: false
 };
@@ -421,7 +433,7 @@ function renderApp() {
       if (STATE.activeView === "analisis" || STATE.activeView === "dashboard") {
         initAnalisisCharts();
       }
-      if (STATE.activeView === "gps_solicitudes") {
+      if (STATE.activeView === "gps_solicitudes" && STATE.gpsTab === "mapa") {
         initGpsLeafletMap();
       }
     }, 60);
@@ -429,10 +441,10 @@ function renderApp() {
 }
 
 // ============================================================================
-// LOGIN CORPORATIVO ENTERPRISE SPLIT-SCREEN (6 ROLES)
+// LOGIN CORPORATIVO ENTERPRISE SPLIT-SCREEN (ACCESO UNIFICADO)
 // ============================================================================
 
-function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colaborador";
+function renderLoginScreen() {
   return `
     <div class="login-wrapper">
       <div class="login-hero">
@@ -470,18 +482,18 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
           <div class="login-title">Bienvenido</div>
           <div class="login-subtitle">Ingresa tus credenciales para continuar</div>
 
-          <div class="login-mode-tabs" role="tablist">`r`n            <button type="button" class="login-mode-tab ${!isColab ? "active" : ""}" data-login-mode="corporativo">`r`n              ${icon("briefcase", 15)} Gestión Corporativa`r`n            </button>`r`n            <button type="button" class="login-mode-tab ${isColab ? "active" : ""}" data-login-mode="colaborador">`r`n              ${icon("user-circle", 15)} Soy Colaborador`r`n            </button>`r`n          </div>`r`n`r`n          <form id="form-login-unificado">
+          <form id="form-login-unificado">
             <div class="form-group">
               <label class="form-label" for="login-identificador">
-                ${isColab ? "ID Biométrico / Número de Cédula" : "Usuario Corporativo"}
+                Usuario o ID de Empleado
               </label>
               <div class="login-input-group">
-                <span class="login-input-icon">${icon(isColab ? "id-card" : "user", 17)}</span>
+                <span class="login-input-icon">${icon("user", 17)}</span>
                 <input
                   type="text"
                   id="login-identificador"
                   class="form-control"
-                  placeholder="${isColab ? "Ej: 1003001750 o código de huella" : "Ej: usuario corporativo"}"
+                  placeholder="Ingresa tu usuario o código"
                   autocomplete="username"
                   required
                 />
@@ -490,7 +502,7 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
 
             <div class="form-group">
               <label class="form-label" for="login-clave">
-                ${isColab ? "PIN de Acceso Móvil" : "Contraseña"}
+                Contraseña o PIN
               </label>
               <div class="login-input-group">
                 <span class="login-input-icon">${icon("lock", 17)}</span>
@@ -498,7 +510,7 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
                   type="${STATE.showPassword ? "text" : "password"}"
                   id="login-clave"
                   class="form-control"
-                  placeholder="${isColab ? "Ingresa tu PIN numérico" : "Ingresa tu contraseña"}"
+                  placeholder="Ingresa tu contraseña o PIN"
                   autocomplete="current-password"
                   required
                 />
@@ -509,7 +521,7 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
             </div>
 
             <button type="submit" id="btn-submit-login" class="btn btn-primary btn-block" style="margin-top:16px; padding:13px; font-size:0.95rem;">
-              ${icon("log-in", 17)} ${isColab ? "Ingresar al Portal del Colaborador" : "Iniciar Sesión Corporativa"}
+              ${icon("log-in", 17)} Iniciar Sesión
             </button>
           </form>
 
@@ -517,7 +529,7 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
             STATE.deferredInstallPrompt
               ? `
             <button type="button" id="btn-install-pwa-login" class="btn btn-outline btn-block" style="margin-top:12px;">
-              ${icon("smartphone", 17)} Instalar App de Sterinova en este Dispositivo
+              ${icon("smartphone", 17)} Instalar App de Sterinova
             </button>
           `
               : ""
@@ -529,7 +541,7 @@ function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colabor
 }
 
 function bindLoginEvents() {
-  document.getElementById("btn-theme-login")?.addEventListener("click", toggleDarkMode);`r`n`r`n  document.querySelectorAll("[data-login-mode]").forEach((btn) => {`r`n    btn.addEventListener("click", () => {`r`n      STATE.loginMode = btn.dataset.loginMode;`r`n      renderApp();`r`n      setTimeout(() => document.getElementById("login-identificador")?.focus(), 20);`r`n    });`r`n  });
+  document.getElementById("btn-theme-login")?.addEventListener("click", toggleDarkMode);
 
   document.getElementById("btn-toggle-pass")?.addEventListener("click", () => {
     const passEl = document.getElementById("login-clave");
@@ -759,28 +771,23 @@ function renderManagementLayout() {
 
       <div class="main-area">
         <header class="topbar">
-          <div>
-            <div class="topbar-breadcrumb">STERINOVA WORKFORCE / ${roleInfo.text}</div>
-            <div class="topbar-title">${icon(currentNav.lucide || "layout-grid", 20)} <span>${currentNav.label}</span></div>
+          <div class="topbar-left">
+            <div class="topbar-title">${icon(currentNav.lucide || "layout-grid", 19)} <span>${currentNav.label}</span></div>
           </div>
-          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-            <button type="button" id="btn-toggle-notifs" class="btn btn-outline btn-sm" style="position:relative;">
-              ${icon("bell", 16)} <span>Notificaciones</span>
-              <span id="notif-bell-count" class="badge badge-danger" style="margin-left:4px; display:${
+          <div class="topbar-right">
+            ${
+              STATE.deferredInstallPrompt
+                ? `<button type="button" id="btn-install-pwa" class="btn btn-action btn-sm">${icon("smartphone", 15)} Instalar App</button>`
+                : ""
+            }
+            <button type="button" id="btn-toggle-notifs" class="icon-btn" title="Notificaciones">
+              ${icon("bell", 17)}
+              <span id="notif-bell-count" class="notif-dot" style="display:${
                 STATE.notificacionesNoLeidas > 0 ? "inline-flex" : "none"
               };">${STATE.notificacionesNoLeidas}</span>
             </button>
-            <button type="button" id="btn-toggle-theme" class="btn btn-outline btn-sm">
-              ${STATE.darkMode ? `${icon("sun", 16)} Claro` : `${icon("moon", 16)} Oscuro`}
-            </button>
-            ${
-              STATE.deferredInstallPrompt
-                ? `<button type="button" id="btn-install-pwa" class="btn btn-action btn-sm">${icon("smartphone", 16)} Instalar App</button>`
-                : ""
-            }
-            <span class="badge badge-info">${icon(roleInfo.lucide, 14)} ${roleInfo.text}</span>
-            <button type="button" id="btn-top-logout" class="btn btn-danger btn-sm">
-              ${icon("log-out", 15)} Salir
+            <button type="button" id="btn-toggle-theme" class="icon-btn" title="${STATE.darkMode ? "Cambiar a modo claro" : "Cambiar a modo oscuro"}">
+              ${STATE.darkMode ? icon("sun", 17) : icon("moon", 17)}
             </button>
           </div>
         </header>
@@ -790,6 +797,8 @@ function renderManagementLayout() {
           ${renderManagementViewContent()}
         </main>
       </div>
+
+      ${renderActiveDrawer()}
 
       <nav class="bottom-nav">
         ${navItems
@@ -838,10 +847,403 @@ function renderManagementViewContent() {
 }
 
 // ============================================================================
-// 1. VISTA SUPERADMIN: GESTIÓN LIBRE DE ÁREAS Y CREACIÓN DE LOS 6 ROLES
+// DRAWER / MODAL CORPORATIVO GLOBAL PARA FORMULARIOS LIMPIOS
+// ============================================================================
+
+function openDrawer(type, data = null) {
+  STATE.activeDrawer = type;
+  STATE.drawerData = data;
+  renderApp();
+}
+
+function closeDrawer() {
+  STATE.activeDrawer = null;
+  STATE.drawerData = null;
+  renderApp();
+}
+
+function renderActiveDrawer() {
+  if (!STATE.activeDrawer) return "";
+  const d = STATE.drawerData || {};
+
+  if (STATE.activeDrawer === "area") {
+    const isEdit = Boolean(d.id);
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("building-2", 18)} <span>${isEdit ? "Editar Área" : "Nueva Área"}</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-area" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <input type="hidden" id="area-id" value="${d.id || ""}" />
+              <div class="form-group">
+                <label class="form-label">Nombre del Área</label>
+                <input type="text" id="area-nombre" class="form-control" value="${d.nombre || ""}" placeholder="Ej: Producción, Calidad, Conductores..." required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Descripción</label>
+                <textarea id="area-desc" class="form-control" rows="3" placeholder="Descripción opcional del área">${d.descripcion || ""}</textarea>
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("save", 16)} ${isEdit ? "Actualizar Área" : "Crear Área"}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "usuario") {
+    const isEdit = Boolean(d.username);
+    const rolActual = d.rol || "supervisor";
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("user-plus", 18)} <span>${isEdit ? "Editar Usuario" : "Nuevo Usuario del Sistema"}</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-usuario-sistema" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <div class="form-group">
+                <label class="form-label">Usuario de Ingreso (Username)</label>
+                <input type="text" id="usr-username" class="form-control" value="${d.username || ""}" placeholder="Ej: sup_produccion, auditor1, rrhh" ${isEdit ? "readonly" : ""} required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Nombre Completo</label>
+                <input type="text" id="usr-nombre" class="form-control" value="${d.nombre || ""}" placeholder="Nombre y Apellido" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Rol del Usuario</label>
+                <select id="usr-rol" class="form-control">
+                  <option value="supervisor" ${rolActual === "supervisor" ? "selected" : ""}>Supervisor de Área</option>
+                  <option value="auditor" ${rolActual === "auditor" ? "selected" : ""}>Auditor de Horas Extras</option>
+                  <option value="talento_humano" ${rolActual === "talento_humano" ? "selected" : ""}>Talento Humano (RRHH)</option>
+                  <option value="admin" ${rolActual === "admin" ? "selected" : ""}>Admin General (Gerencia)</option>
+                  <option value="superadmin" ${rolActual === "superadmin" ? "selected" : ""}>Superadministrador</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Área Ligada <small style="color:var(--texto-sec);">(Obligatoria para Supervisor)</small></label>
+                <select id="usr-area" class="form-control">
+                  <option value="">-- Global / Todas las Áreas --</option>
+                  ${STATE.areas
+                    .map((a) => `<option value="${a.id}" ${String(d.id_area || "") === String(a.id) ? "selected" : ""}>${a.nombre}</option>`)
+                    .join("")}
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">${isEdit ? "Nueva Contraseña" : "Contraseña"}</label>
+                <input type="password" id="usr-password" class="form-control" placeholder="${isEdit ? "Ingrese nueva contraseña" : "Contraseña de acceso"}" required />
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("save", 16)} ${isEdit ? "Guardar Cambios" : "Crear Usuario"}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "empleado") {
+    const isEdit = Boolean(d.id_empleado);
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("user-plus", 18)} <span>${isEdit ? "Editar Empleado" : "Nuevo Empleado"}</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-empleado" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <div class="form-group">
+                <label class="form-label">ID / Código Biométrico</label>
+                <input type="text" id="emp-id" class="form-control" value="${d.id_empleado || ""}" placeholder="Ej: 141 o 1003001750" ${isEdit ? "readonly" : ""} required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Nombre Completo</label>
+                <input type="text" id="emp-nombre" class="form-control" value="${d.nombre || ""}" placeholder="Apellidos y Nombres" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Área Asignada</label>
+                <select id="emp-area" class="form-control" required>
+                  <option value="">-- Seleccione Área --</option>
+                  ${STATE.areas
+                    .map((a) => `<option value="${a.id}" ${String(d.id_area || "") === String(a.id) ? "selected" : ""}>${a.nombre}</option>`)
+                    .join("")}
+                </select>
+              </div>
+              <div class="grid-2">
+                <div class="form-group">
+                  <label class="form-label">Cargo / Puesto</label>
+                  <input type="text" id="emp-cargo" class="form-control" value="${d.cargo || "Operario"}" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">PIN App Móvil</label>
+                  <input type="text" id="emp-pin" class="form-control" value="${d.pin || "1234"}" required />
+                </div>
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("save", 16)} ${isEdit ? "Actualizar Empleado" : "Guardar Empleado"}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "importar_empleados") {
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("file-spreadsheet", 18)} <span>Importar Empleados desde Excel</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <div class="drawer-body">
+            <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:14px;">
+              Sube un archivo Excel (.xlsx / .xls) con columnas: <code>ID | Nombre | Área | Cargo | PIN</code>. Esta base de personal es independiente del huellero.
+            </p>
+            <div class="form-group">
+              <label class="form-label">Área por defecto (si el Excel no incluye columna Área)</label>
+              <select id="import-emp-area-default" class="form-control">
+                <option value="">-- Detectar columna Área del Excel --</option>
+                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+              </select>
+            </div>
+            <div id="emp-dropzone" class="dropzone-box" style="padding:28px 18px;">
+              <div style="margin-bottom:8px; color:var(--petroleo);">${icon("upload-cloud", 34)}</div>
+              <div style="font-weight:700; color:var(--petroleo); font-size:0.92rem;">
+                Arrastra el Excel aquí o haz clic para seleccionar
+              </div>
+              <div style="font-size:0.78rem; color:var(--texto-sec); margin-top:4px;">Formatos soportados: .xlsx, .xls</div>
+              <input type="file" id="import-emp-excel" accept=".xlsx,.xls" style="display:none;" />
+            </div>
+          </div>
+          <div class="drawer-footer">
+            <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cerrar</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "festivo") {
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("calendar-plus", 18)} <span>Registrar Día Festivo</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-festivo" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <div class="form-group">
+                <label class="form-label">Fecha Festiva</label>
+                <input type="date" id="festivo-fecha" class="form-control" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Descripción / Celebración</label>
+                <input type="text" id="festivo-desc" class="form-control" placeholder="Ej: Día del Trabajo" required />
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("save", 16)} Guardar Festivo</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "turno") {
+    const isEdit = Boolean(d.id);
+    const isSup = STATE.user?.role === "supervisor";
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("clock", 18)} <span>${isEdit ? "Editar Turno" : "Nuevo Turno"}</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-turno" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <input type="hidden" id="turno-id" value="${d.id || ""}" />
+              <div class="form-group">
+                <label class="form-label">Nombre del Turno</label>
+                <input type="text" id="turno-nombre" class="form-control" value="${d.nombre || ""}" placeholder="Ej: Turno Mañana 06 a 14" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Área del Turno</label>
+                ${
+                  isSup
+                    ? `<input type="text" class="form-control" value="${STATE.user.nombre_area || ""}" disabled />
+                       <input type="hidden" id="turno-area" value="${STATE.user.id_area || ""}" />`
+                    : `<select id="turno-area" class="form-control">
+                        <option value="">-- Global (Todas las Áreas) --</option>
+                        ${STATE.areas
+                          .map((a) => `<option value="${a.id}" ${String(d.id_area || "") === String(a.id) ? "selected" : ""}>${a.nombre}</option>`)
+                          .join("")}
+                      </select>`
+                }
+              </div>
+              <div class="grid-2">
+                <div class="form-group">
+                  <label class="form-label">Hora Entrada (24h)</label>
+                  <input type="time" id="turno-entrada" class="form-control" value="${d.hora_entrada || "06:00"}" required />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Hora Salida (24h)</label>
+                  <input type="time" id="turno-salida" class="form-control" value="${d.hora_salida || "14:00"}" required />
+                </div>
+              </div>
+              <div class="grid-2">
+                <div class="form-group">
+                  <label class="form-label">Tolerancia tarde (min)</label>
+                  <input type="number" id="turno-tolerancia" class="form-control" value="${d.tolerancia_min ?? 10}" min="0" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Descanso intermedio (min)</label>
+                  <input type="number" id="turno-descanso" class="form-control" value="${d.descanso_min ?? 0}" min="0" />
+                </div>
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("save", 16)} ${isEdit ? "Actualizar Turno" : "Guardar Turno"}</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "comunicado") {
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("megaphone", 18)} <span>Nuevo Memorando / Capacitación</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-comunicado" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <div class="form-group">
+                <label class="form-label">Tipo de Comunicado</label>
+                <select id="com-tipo" class="form-control">
+                  <option value="CAPACITACIÓN">Citación a Capacitación</option>
+                  <option value="MEMORANDO">Memorando Oficial</option>
+                  <option value="COMUNICADO RRHH">Comunicado General RRHH</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Fecha/Hora del Evento (Opcional)</label>
+                <input type="text" id="com-fecha" class="form-control" placeholder="Ej: Viernes 27 Nov - 2:00 PM" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Dirigido a</label>
+                <select id="com-destino-tipo" class="form-control">
+                  <option value="TODOS">Toda la Empresa</option>
+                  <option value="AREA">Un Área Específica</option>
+                  <option value="EMPLEADO">Un Empleado Específico</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Seleccionar Área o Empleado (si aplica)</label>
+                <select id="com-destino-valor" class="form-control">
+                  <option value="">-- Toda la Empresa --</option>
+                  <optgroup label="Áreas">
+                    ${STATE.areas.map((a) => `<option value="AREA:${a.id}">Área: ${a.nombre}</option>`).join("")}
+                  </optgroup>
+                  <optgroup label="Empleados">
+                    ${STATE.empleados.map((e) => `<option value="EMP:${e.id_empleado}">${e.id_empleado} - ${e.nombre}</option>`).join("")}
+                  </optgroup>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Título / Asunto</label>
+                <input type="text" id="com-titulo" class="form-control" placeholder="Ej: Capacitación en Seguridad y Salud en el Trabajo" required />
+              </div>
+              <div class="form-group">
+                <label class="form-label">Mensaje Detallado</label>
+                <textarea id="com-mensaje" class="form-control" rows="4" placeholder="Escribe los detalles del memorando o capacitación..." required></textarea>
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("send", 15)} Enviar y Notificar</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  if (STATE.activeDrawer === "emp_solicitud") {
+    const today = new Date().toISOString().slice(0, 10);
+    return `
+      <div class="drawer-backdrop" id="drawer-backdrop">
+        <div class="drawer-panel">
+          <div class="drawer-header">
+            <div class="drawer-title">${icon("file-plus", 18)} <span>Nueva Solicitud de Permiso</span></div>
+            <button type="button" class="icon-btn" id="btn-close-drawer">${icon("x", 16)}</button>
+          </div>
+          <form id="form-emp-solicitud" style="display:flex; flex-direction:column; flex:1; min-height:0;">
+            <div class="drawer-body">
+              <div class="form-group">
+                <label class="form-label">Tipo de Solicitud</label>
+                <select id="sol-tipo" class="form-control">
+                  <option value="PERMISO MÉDICO / PERSONAL">Permiso Médico / Personal</option>
+                  <option value="CAMBIO DE TURNO">Cambio de Turno</option>
+                  <option value="OLVIDO DE MARCACIÓN">Justificación de Marcación</option>
+                  <option value="VACACIONES / LICENCIA">Vacaciones / Licencia</option>
+                </select>
+              </div>
+              <div class="grid-2">
+                <div class="form-group">
+                  <label class="form-label">Desde Fecha</label>
+                  <input type="date" id="sol-inicio" class="form-control" value="${today}" required />
+                </div>
+                <div class="form-group">
+                  <label class="form-label">Hasta Fecha</label>
+                  <input type="date" id="sol-fin" class="form-control" value="${today}" required />
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label">Motivo o Explicación</label>
+                <textarea id="sol-motivo" class="form-control" rows="4" placeholder="Describe tu solicitud (la revisará tu Supervisor y luego Talento Humano)..." required></textarea>
+              </div>
+            </div>
+            <div class="drawer-footer">
+              <button type="button" class="btn btn-outline" id="btn-cancel-drawer">Cancelar</button>
+              <button type="submit" class="btn btn-primary">${icon("send", 15)} Enviar Solicitud</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
+  return "";
+}
+
+// ============================================================================
+// 1. VISTA SUPERADMIN: ÁREAS Y USUARIOS (TABS + TABLA ANCHO COMPLETO + DRAWER)
 // ============================================================================
 
 function renderSuperadminAreasYUsuarios() {
+  const tab = STATE.superadminTab || "usuarios";
+  const totalSupervisores = STATE.usuarios.filter((u) => u.rol === "supervisor").length;
+
   const qUsr = (STATE.searchUsuarios || "").toLowerCase();
   const usuariosFiltrados = STATE.usuarios.filter(
     (u) =>
@@ -851,184 +1253,203 @@ function renderSuperadminAreasYUsuarios() {
       u.rol.toLowerCase().includes(qUsr)
   );
 
+  const roleBadges = {
+    superadmin: `<span class="badge badge-danger">${icon("shield-check", 13)} Superadmin</span>`,
+    admin: `<span class="badge badge-info">${icon("layout-dashboard", 13)} Admin General</span>`,
+    supervisor: `<span class="badge badge-ok">${icon("user-check", 13)} Supervisor</span>`,
+    auditor: `<span class="badge badge-warn">${icon("file-check-2", 13)} Auditor H.E.</span>`,
+    talento_humano: `<span class="badge badge-info">${icon("users", 13)} Talento Humano</span>`
+  };
+
   return `
-    <div class="alert-banner alert-ok">
-      <div>
-        <strong>${icon("shield-check", 16)} Configuración Organizacional (Superadmin):</strong> 1) Define las <strong>Áreas</strong> de la empresa. 2) Crea a los <strong>Supervisores</strong> (ligados a su Área), al <strong>Auditor de Horas Extras</strong>, a <strong>Talento Humano</strong> y al <strong>Admin General</strong>.
-      </div>
-      <button type="button" class="btn btn-primary btn-sm" data-goto="empleados">
-        ${icon("users", 15)} Ir a Base de Empleados →
-      </button>
-    </div>
-
-    <div class="grid-2">
-      <!-- Módulo de Áreas -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">${icon("building-2", 18)} <span>1. Gestión de Áreas de la Empresa (${STATE.areas.length})</span></div>
-        </div>
-        <form id="form-area">
-          <input type="hidden" id="area-id" value="" />
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Nombre del Área</label>
-              <input type="text" id="area-nombre" class="form-control" placeholder="Ej: Producción, Calidad, Conductores..." required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Descripción</label>
-              <input type="text" id="area-desc" class="form-control" placeholder="Descripción opcional" />
-            </div>
-          </div>
-          <div style="display:flex; gap:8px; margin-bottom:16px;">
-            <button type="submit" class="btn btn-primary" style="flex:1;">${icon("save", 16)} Guardar Área</button>
-            <button type="button" id="btn-limpiar-area" class="btn btn-outline">Limpiar</button>
-          </div>
-        </form>
-
-        <div class="table-responsive" style="max-height:260px;">
-          <table>
-            <thead>
-              <tr>
-                <th>Área</th>
-                <th>Supervisores</th>
-                <th>Empleados</th>
-                <th>Acciones</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${STATE.areas
-                .map(
-                  (a) => `
-                <tr>
-                  <td><strong>${a.nombre}</strong><br/><small style="color:var(--texto-sec);">${a.descripcion}</small></td>
-                  <td><span class="badge badge-info">${a.total_supervisores} sup.</span></td>
-                  <td><span class="badge badge-ok">${a.total_empleados} emp.</span></td>
-                  <td>
-                    <button type="button" class="btn btn-outline btn-sm btn-edit-area" data-id="${a.id}" data-nombre="${a.nombre}" data-desc="${a.descripcion}">${icon("pencil", 14)} Editar</button>
-                    <button type="button" class="btn btn-danger btn-sm btn-del-area" data-id="${a.id}">${icon("trash-2", 14)}</button>
-                  </td>
-                </tr>
-              `
-                )
-                .join("")}
-            </tbody>
-          </table>
+    <div class="corp-kpi-strip">
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("building-2", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Áreas Activas</div>
+          <div class="corp-kpi-mini-val">${STATE.areas.length}</div>
         </div>
       </div>
-
-      <!-- Módulo de Usuarios y Roles -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">${icon("user-plus", 18)} <span>2. Crear / Asignar Usuarios por Rol y Área</span></div>
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("users", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Usuarios del Sistema</div>
+          <div class="corp-kpi-mini-val">${STATE.usuarios.length}</div>
         </div>
-        <form id="form-usuario-sistema">
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Usuario de Ingreso (Username)</label>
-              <input type="text" id="usr-username" class="form-control" placeholder="Ej: sup_produccion, auditor1, rrhh" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Rol del Usuario</label>
-              <select id="usr-rol" class="form-control">
-                <option value="supervisor">Supervisor de Área (Turnos, Huellero y Permisos de su Área)</option>
-                <option value="auditor">Auditor de Horas Extras (Control y Reportes de Horas Extra)</option>
-                <option value="talento_humano">Talento Humano (Permisos, Memorandos y Multi-Área)</option>
-                <option value="admin">Admin General (Gerencia: Consulta Global y Métricas)</option>
-                <option value="superadmin">Superadministrador (Control Maestro)</option>
-              </select>
-            </div>
-          </div>
-          <div class="grid-3">
-            <div class="form-group">
-              <label class="form-label">Área Ligada (Obligatoria p/ Supervisor)</label>
-              <select id="usr-area" class="form-control">
-                <option value="">-- Global / Todas las Áreas --</option>
-                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Nombre Completo</label>
-              <input type="text" id="usr-nombre" class="form-control" placeholder="Nombre y Apellido" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Contraseña</label>
-              <input type="password" id="usr-password" class="form-control" placeholder="Contraseña" required />
-            </div>
-          </div>
-          <div style="display:flex; gap:10px;">
-            <button type="submit" class="btn btn-primary" style="flex:1;">${icon("save", 16)} Guardar Usuario</button>
-            <button type="button" id="btn-limpiar-usr" class="btn btn-outline">Limpiar</button>
-          </div>
-        </form>
+      </div>
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("user-check", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Supervisores de Área</div>
+          <div class="corp-kpi-mini-val">${totalSupervisores}</div>
+        </div>
+      </div>
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("id-card", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Empleados Registrados</div>
+          <div class="corp-kpi-mini-val">${STATE.empleados.length}</div>
+        </div>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">${icon("users", 18)} <span>Directorio de Usuarios del Sistema (${usuariosFiltrados.length} / ${STATE.usuarios.length})</span></div>
-        <div class="search-input-wrap">
-          <input type="text" id="search-usuarios-table" class="form-control" placeholder="Buscar por usuario, nombre, rol o área..." value="${STATE.searchUsuarios || ""}" />
-        </div>
+    <div class="corp-tabs-bar">
+      <div class="corp-tabs">
+        <button type="button" class="corp-tab ${tab === "usuarios" ? "active" : ""}" data-sa-tab="usuarios">
+          ${icon("users", 16)} Usuarios y Roles <span class="corp-tab-count">${STATE.usuarios.length}</span>
+        </button>
+        <button type="button" class="corp-tab ${tab === "areas" ? "active" : ""}" data-sa-tab="areas">
+          ${icon("building-2", 16)} Áreas de la Empresa <span class="corp-tab-count">${STATE.areas.length}</span>
+        </button>
       </div>
-      <div class="table-responsive">
-        <table>
-          <thead>
-            <tr>
-              <th>Usuario</th>
-              <th>Nombre</th>
-              <th>Rol Asignado</th>
-              <th>Área Ligada</th>
-              <th>Acciones</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${usuariosFiltrados
-              .map((u) => {
-                const roleBadges = {
-                  superadmin: `<span class="badge badge-danger">${icon("shield-check", 13)} Superadmin</span>`,
-                  admin: `<span class="badge badge-info">${icon("layout-dashboard", 13)} Admin General</span>`,
-                  supervisor: `<span class="badge badge-ok">${icon("user-check", 13)} Supervisor</span>`,
-                  auditor: `<span class="badge badge-warn">${icon("file-check-2", 13)} Auditor Horas Extras</span>`,
-                  talento_humano: `<span class="badge badge-info">${icon("users", 13)} Talento Humano</span>`
-                };
-                return `
-                  <tr>
-                    <td><strong>${u.username}</strong></td>
-                    <td>${u.nombre}</td>
-                    <td>${roleBadges[u.rol] || u.rol}</td>
-                    <td><strong>${u.nombre_area || "Global / Todas las Áreas"}</strong></td>
-                    <td>
-                      <button type="button" class="btn btn-outline btn-sm btn-edit-usr" data-user="${u.username}">${icon("pencil", 14)} Editar</button>
-                      <button type="button" class="btn btn-danger btn-sm btn-del-usr" data-user="${u.username}">${icon("trash-2", 14)} Eliminar</button>
-                    </td>
-                  </tr>
-                `;
-              })
-              .join("")}
-          </tbody>
-        </table>
+      <div style="padding-bottom:8px;">
+        ${
+          tab === "usuarios"
+            ? `<button type="button" class="btn btn-primary btn-sm" id="btn-open-new-usr">${icon("user-plus", 15)} Nuevo Usuario</button>`
+            : `<button type="button" class="btn btn-primary btn-sm" id="btn-open-new-area">${icon("plus", 15)} Nueva Área</button>`
+        }
       </div>
     </div>
-  `;
-}
 
-// ============================================================================
-// 2. VISTA ADMIN GENERAL: SUPERVISORES, ÁREAS Y EMPLEADOS (SOLO CONSULTA)
-// ============================================================================
-
-function renderAdminGeneralEstructura() {
-  const supervisores = STATE.usuarios.filter((u) => u.rol === "supervisor");
-  return `
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">👷 Supervisores por Área (${supervisores.length})</div>
+    ${
+      tab === "usuarios"
+        ? `
+      <div class="corp-toolbar">
+        <div class="corp-toolbar-left">
+          <div class="corp-search-box">
+            ${icon("search", 16)}
+            <input type="text" id="search-usuarios-table" class="form-control" placeholder="Buscar por usuario, nombre, rol o área..." value="${STATE.searchUsuarios || ""}" />
+          </div>
         </div>
+        <div class="corp-toolbar-right">
+          <span style="font-size:0.8rem; color:var(--texto-sec); font-weight:600;">Mostrando ${usuariosFiltrados.length} de ${STATE.usuarios.length}</span>
+        </div>
+      </div>
+
+      <div class="corp-table-card">
         <div class="table-responsive">
           <table>
             <thead>
               <tr>
-                <th>Supervisor</th>
+                <th>Usuario</th>
+                <th>Nombre Completo</th>
+                <th>Rol Asignado</th>
+                <th>Área Ligada</th>
+                <th style="width:110px; text-align:right;">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                usuariosFiltrados.length === 0
+                  ? `<tr><td colspan="5" style="text-align:center; padding:28px; color:var(--texto-sec);">No se encontraron usuarios.</td></tr>`
+                  : usuariosFiltrados
+                      .map(
+                        (u) => `
+                <tr>
+                  <td><strong>${u.username}</strong></td>
+                  <td>${u.nombre}</td>
+                  <td>${roleBadges[u.rol] || u.rol}</td>
+                  <td>${u.nombre_area ? `<span class="badge badge-info">${u.nombre_area}</span>` : `<span style="color:var(--texto-sec); font-size:0.82rem;">Global</span>`}</td>
+                  <td style="text-align:right;">
+                    <div class="row-actions">
+                      <button type="button" class="icon-btn btn-edit-usr" data-user="${u.username}" title="Editar usuario">${icon("pencil", 15)}</button>
+                      <button type="button" class="icon-btn icon-btn-danger btn-del-usr" data-user="${u.username}" title="Eliminar usuario">${icon("trash-2", 15)}</button>
+                    </div>
+                  </td>
+                </tr>
+              `
+                      )
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `
+        : `
+      <div class="corp-table-card">
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Nombre del Área</th>
+                <th>Descripción</th>
+                <th>Supervisores</th>
+                <th>Empleados</th>
+                <th style="width:110px; text-align:right;">Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.areas.length === 0
+                  ? `<tr><td colspan="5" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay áreas creadas.</td></tr>`
+                  : STATE.areas
+                      .map(
+                        (a) => `
+                <tr>
+                  <td><strong>${a.nombre}</strong></td>
+                  <td style="color:var(--texto-sec);">${a.descripcion || "—"}</td>
+                  <td><span class="badge badge-info">${a.total_supervisores} sup.</span></td>
+                  <td><span class="badge badge-ok">${a.total_empleados} emp.</span></td>
+                  <td style="text-align:right;">
+                    <div class="row-actions">
+                      <button type="button" class="icon-btn btn-edit-area" data-id="${a.id}" data-nombre="${a.nombre}" data-desc="${a.descripcion || ""}" title="Editar área">${icon("pencil", 15)}</button>
+                      <button type="button" class="icon-btn icon-btn-danger btn-del-area" data-id="${a.id}" title="Eliminar área">${icon("trash-2", 15)}</button>
+                    </div>
+                  </td>
+                </tr>
+              `
+                      )
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `
+    }
+  `;
+}
+
+// ============================================================================
+// 2. VISTA ADMIN GENERAL: SUPERVISORES, ÁREAS Y EMPLEADOS (TABS + TABLAS)
+// ============================================================================
+
+function renderAdminGeneralEstructura() {
+  const supervisores = STATE.usuarios.filter((u) => u.rol === "supervisor");
+  const tab = STATE.adminEstructuraTab || "supervisores";
+  const qEmp = (STATE.searchEmpleados || "").toLowerCase();
+  const empleadosFiltrados = STATE.empleados.filter(
+    (e) =>
+      e.id_empleado.toLowerCase().includes(qEmp) ||
+      e.nombre.toLowerCase().includes(qEmp) ||
+      (e.nombre_area || "").toLowerCase().includes(qEmp)
+  );
+
+  return `
+    <div class="corp-tabs-bar">
+      <div class="corp-tabs">
+        <button type="button" class="corp-tab ${tab === "supervisores" ? "active" : ""}" data-est-tab="supervisores">
+          ${icon("user-check", 16)} Supervisores <span class="corp-tab-count">${supervisores.length}</span>
+        </button>
+        <button type="button" class="corp-tab ${tab === "areas" ? "active" : ""}" data-est-tab="areas">
+          ${icon("building-2", 16)} Áreas <span class="corp-tab-count">${STATE.areas.length}</span>
+        </button>
+        <button type="button" class="corp-tab ${tab === "empleados" ? "active" : ""}" data-est-tab="empleados">
+          ${icon("users", 16)} Plantilla de Empleados <span class="corp-tab-count">${STATE.empleados.length}</span>
+        </button>
+      </div>
+    </div>
+
+    ${
+      tab === "supervisores"
+        ? `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
+          <table>
+            <thead>
+              <tr>
+                <th>Nombre del Supervisor</th>
                 <th>Usuario</th>
                 <th>Área Asignada</th>
               </tr>
@@ -1036,14 +1457,14 @@ function renderAdminGeneralEstructura() {
             <tbody>
               ${
                 supervisores.length === 0
-                  ? `<tr><td colspan="3" style="text-align:center; padding:18px;">No hay supervisores registrados aún.</td></tr>`
+                  ? `<tr><td colspan="3" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay supervisores registrados aún.</td></tr>`
                   : supervisores
                       .map(
                         (s) => `
                   <tr>
                     <td><strong>${s.nombre}</strong></td>
                     <td><code>${s.username}</code></td>
-                    <td><span class="badge badge-ok">${s.nombre_area}</span></td>
+                    <td><span class="badge badge-ok">${s.nombre_area || "Sin Área"}</span></td>
                   </tr>
                 `
                       )
@@ -1053,16 +1474,16 @@ function renderAdminGeneralEstructura() {
           </table>
         </div>
       </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">🏛️ Resumen por Áreas (${STATE.areas.length})</div>
-        </div>
-        <div class="table-responsive">
+    `
+        : tab === "areas"
+        ? `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
           <table>
             <thead>
               <tr>
                 <th>Área</th>
+                <th>Descripción</th>
                 <th>Supervisores</th>
                 <th>Empleados</th>
               </tr>
@@ -1073,8 +1494,9 @@ function renderAdminGeneralEstructura() {
                   (a) => `
                 <tr>
                   <td><strong>${a.nombre}</strong></td>
-                  <td>${a.total_supervisores}</td>
-                  <td><strong>${a.total_empleados}</strong></td>
+                  <td style="color:var(--texto-sec);">${a.descripcion || "—"}</td>
+                  <td><span class="badge badge-info">${a.total_supervisores} sup.</span></td>
+                  <td><span class="badge badge-ok">${a.total_empleados} emp.</span></td>
                 </tr>
               `
                 )
@@ -1083,141 +1505,165 @@ function renderAdminGeneralEstructura() {
           </table>
         </div>
       </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">👥 Plantilla Global de Empleados (${STATE.empleados.length})</div>
+    `
+        : `
+      <div class="corp-toolbar">
+        <div class="corp-toolbar-left">
+          <div class="corp-search-box">
+            ${icon("search", 16)}
+            <input type="text" id="search-empleados-table" class="form-control" placeholder="Buscar empleado por ID, nombre o área..." value="${STATE.searchEmpleados || ""}" />
+          </div>
+        </div>
       </div>
-      <div class="table-responsive" style="max-height:460px;">
-        <table>
-          <thead>
-            <tr>
-              <th>ID Biométrico</th>
-              <th>Nombre Completo</th>
-              <th>Área Asignada</th>
-              <th>Cargo</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${STATE.empleados
-              .map(
-                (e) => `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 260px);">
+          <table>
+            <thead>
               <tr>
-                <td><strong>${e.id_empleado}</strong></td>
-                <td>${e.nombre}</td>
-                <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
-                <td>${e.cargo || "Operario"}</td>
+                <th>ID Biométrico</th>
+                <th>Nombre Completo</th>
+                <th>Área Asignada</th>
+                <th>Cargo</th>
               </tr>
-            `
-              )
-              .join("")}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              ${empleadosFiltrados
+                .map(
+                  (e) => `
+                <tr>
+                  <td><strong>${e.id_empleado}</strong></td>
+                  <td>${e.nombre}</td>
+                  <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
+                  <td>${e.cargo || "Operario"}</td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    `
+    }
   `;
 }
 
 // ============================================================================
-// 3. VISTA TALENTO HUMANO: MEMORANDOS/CAPACITACIONES + PERMISOS + REPORTE EXCEL
+// 3. VISTA TALENTO HUMANO: TABS (PERMISOS | MEMORANDOS) + DRAWER DE ENVÍO
 // ============================================================================
 
 function renderTalentoHumanoCentro() {
+  const tab = STATE.rrhhTab || "permisos";
+  const pendientesRRHH = STATE.solicitudes.filter((s) => s.estado === "AVALADO_SUPERVISOR" || s.estado === "PENDIENTE_SUPERVISOR").length;
+
   return `
-    <div class="grid-2">
-      <!-- Envío de Memorandos, Capacitaciones y Comunicados con Notificación en Tiempo Real -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">📢 Enviar Memorando, Citación a Capacitación o Comunicado</div>
-        </div>
-        <form id="form-comunicado">
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Tipo de Comunicado</label>
-              <select id="com-tipo" class="form-control">
-                <option value="CAPACITACIÓN">🎓 Citación a Capacitación</option>
-                <option value="MEMORANDO">📋 Memorando Oficial</option>
-                <option value="COMUNICADO RRHH">📢 Comunicado General RRHH</option>
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Fecha/Hora del Evento (Opcional)</label>
-              <input type="text" id="com-fecha" class="form-control" placeholder="Ej: Viernes 27 Nov - 2:00 PM" />
-            </div>
-          </div>
-
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Dirigido a</label>
-              <select id="com-destino-tipo" class="form-control">
-                <option value="TODOS">🏢 Toda la Empresa</option>
-                <option value="AREA">🏛️ Un Área Específica</option>
-                <option value="EMPLEADO">👤 Un Empleado Específico</option>
-              </select>
-            </div>
-            <div class="form-group" id="com-destino-valor-wrap">
-              <label class="form-label">Seleccionar Área o Empleado</label>
-              <select id="com-destino-valor" class="form-control">
-                <option value="">-- Toda la Empresa --</option>
-                <optgroup label="Áreas">
-                  ${STATE.areas.map((a) => `<option value="AREA:${a.id}">Área: ${a.nombre}</option>`).join("")}
-                </optgroup>
-                <optgroup label="Empleados">
-                  ${STATE.empleados.map((e) => `<option value="EMP:${e.id_empleado}">${e.id_empleado} - ${e.nombre}</option>`).join("")}
-                </optgroup>
-              </select>
-            </div>
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">Título / Asunto</label>
-            <input type="text" id="com-titulo" class="form-control" placeholder="Ej: Capacitación obligatoria en Seguridad y Salud en el Trabajo" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Mensaje Detallado</label>
-            <textarea id="com-mensaje" class="form-control" rows="3" placeholder="Escribe los detalles del memorando o capacitación..." required></textarea>
-          </div>
-          <button type="submit" class="btn btn-action btn-block">
-            🔔 Enviar y Notificar en Tiempo Real a los Celulares
-          </button>
-        </form>
+    <div class="corp-tabs-bar">
+      <div class="corp-tabs">
+        <button type="button" class="corp-tab ${tab === "permisos" ? "active" : ""}" data-rrhh-tab="permisos">
+          ${icon("file-check-2", 16)} Permisos y Solicitudes <span class="corp-tab-count">${pendientesRRHH} pend.</span>
+        </button>
+        <button type="button" class="corp-tab ${tab === "comunicados" ? "active" : ""}" data-rrhh-tab="comunicados">
+          ${icon("megaphone", 16)} Memorandos y Capacitaciones <span class="corp-tab-count">${STATE.comunicados.length}</span>
+        </button>
       </div>
+      <div style="padding-bottom:8px; display:flex; gap:8px;">
+        ${
+          tab === "permisos"
+            ? `<button type="button" id="btn-exportar-permisos" class="btn btn-outline btn-sm">${icon("download", 15)} Exportar Excel Permisos</button>`
+            : `<button type="button" id="btn-open-new-comunicado" class="btn btn-primary btn-sm">${icon("send", 15)} Nuevo Memorando / Citación</button>`
+        }
+      </div>
+    </div>
 
-      <!-- Historial de Memorandos y Confirmaciones de Lectura -->
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">📬 Memorandos y Capacitaciones Enviadas (${STATE.comunicados.length})</div>
+    ${
+      tab === "permisos"
+        ? `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
+          <table>
+            <thead>
+              <tr>
+                <th>Empleado / Área</th>
+                <th>Tipo / Fechas</th>
+                <th>Motivo</th>
+                <th>Aval Supervisor</th>
+                <th>Estado</th>
+                <th style="text-align:right;">Decisión RRHH</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.solicitudes.length === 0
+                  ? `<tr><td colspan="6" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay solicitudes de permisos registradas.</td></tr>`
+                  : STATE.solicitudes
+                      .map((s) => {
+                        let badge = "badge-warn";
+                        if (s.estado === "APROBADA") badge = "badge-ok";
+                        else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
+                        else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
+                        return `
+                    <tr>
+                      <td>
+                        <strong>${s.nombre_empleado}</strong> <small style="color:var(--texto-sec);">(${s.id_empleado})</small><br/>
+                        <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
+                      </td>
+                      <td><strong>${s.tipo}</strong><br/><small style="color:var(--texto-sec);">${s.fecha_inicio} a ${s.fecha_fin}</small></td>
+                      <td>${s.motivo}</td>
+                      <td><small>${s.supervisor_usuario ? `${icon("check", 13)} ${s.supervisor_usuario}` : "Pendiente Supervisor"}</small></td>
+                      <td><span class="badge ${badge}">${s.estado}</span></td>
+                      <td style="text-align:right;">
+                        ${
+                          s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")
+                            ? `
+                          <div class="row-actions">
+                            <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">${icon("check", 14)} Aprobar</button>
+                            <button type="button" class="icon-btn icon-btn-danger btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA" title="Rechazar">${icon("x", 15)}</button>
+                          </div>
+                        `
+                            : `<small style="color:var(--texto-sec);">${s.rrhh_usuario || s.respuesta_admin || "Cerrada"}</small>`
+                        }
+                      </td>
+                    </tr>
+                  `;
+                      })
+                      .join("")
+              }
+            </tbody>
+          </table>
         </div>
-        <div class="table-responsive" style="max-height:380px;">
+      </div>
+    `
+        : `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
           <table>
             <thead>
               <tr>
                 <th>Tipo / Fecha</th>
                 <th>Asunto y Mensaje</th>
                 <th>Destinatario</th>
-                <th>Confirmados</th>
+                <th style="text-align:right;">Confirmaciones</th>
               </tr>
             </thead>
             <tbody>
               ${
                 STATE.comunicados.length === 0
-                  ? `<tr><td colspan="4" style="text-align:center; padding:22px;">Aún no se han enviado memorandos ni capacitaciones.</td></tr>`
+                  ? `<tr><td colspan="4" style="text-align:center; padding:28px; color:var(--texto-sec);">Aún no se han enviado memorandos ni capacitaciones. Pulsa "Nuevo Memorando / Citación".</td></tr>`
                   : STATE.comunicados
                       .map(
                         (c) => `
                   <tr>
                     <td>
                       <span class="badge badge-info">${c.tipo}</span><br/>
-                      <small>${c.creado_en}</small>
+                      <small style="color:var(--texto-sec);">${c.creado_en}</small>
                     </td>
                     <td>
                       <strong>${c.titulo}</strong>
-                      ${c.fecha_evento ? `<br/><small style="color:var(--naranja); font-weight:700;">📅 ${c.fecha_evento}</small>` : ""}
+                      ${c.fecha_evento ? `<br/><small style="color:var(--naranja); font-weight:700;">${icon("calendar", 12)} ${c.fecha_evento}</small>` : ""}
                       <br/><small style="color:var(--texto-sec);">${c.mensaje}</small>
                     </td>
                     <td><span class="badge badge-ok">${c.destino_etiqueta}</span></td>
-                    <td><strong>${c.total_lecturas} leído(s)</strong></td>
+                    <td style="text-align:right;"><strong>${c.total_lecturas}</strong> <small style="color:var(--texto-sec);">leído(s)</small></td>
                   </tr>
                 `
                       )
@@ -1227,70 +1673,8 @@ function renderTalentoHumanoCentro() {
           </table>
         </div>
       </div>
-    </div>
-
-    <!-- Gestión Final de Permisos (Avalados por Supervisor) y Exportación Excel -->
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">📝 Gestión de Permisos y Solicitudes de Empleados (${STATE.solicitudes.length})</div>
-        <button type="button" id="btn-exportar-permisos" class="btn btn-primary btn-sm">
-          📥 Exportar Reporte Excel de Permisos y Ausentismo
-        </button>
-      </div>
-      <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:12px;">
-        Flujo: El empleado solicita → Su Supervisor de Área la avala (<code>AVALADO_SUPERVISOR</code>) → Talento Humano da la aprobación final (<code>APROBADA</code>).
-      </p>
-      <div class="table-responsive" style="max-height:420px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Empleado / Área</th>
-              <th>Tipo / Fechas</th>
-              <th>Motivo</th>
-              <th>Aval Supervisor</th>
-              <th>Estado Actual</th>
-              <th>Decisión Final RRHH</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${
-              STATE.solicitudes.length === 0
-                ? `<tr><td colspan="6" style="text-align:center; padding:22px;">No hay solicitudes de permisos registradas.</td></tr>`
-                : STATE.solicitudes
-                    .map((s) => {
-                      let badge = "badge-warn";
-                      if (s.estado === "APROBADA") badge = "badge-ok";
-                      else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
-                      else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
-                      return `
-                  <tr>
-                    <td>
-                      <strong>${s.nombre_empleado}</strong> (ID: ${s.id_empleado})<br/>
-                      <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
-                    </td>
-                    <td><strong>${s.tipo}</strong><br/><small>${s.fecha_inicio} a ${s.fecha_fin}</small></td>
-                    <td>${s.motivo}</td>
-                    <td><small>${s.supervisor_usuario ? `✔ ${s.supervisor_usuario}` : "Pendiente Supervisor"}</small></td>
-                    <td><span class="badge ${badge}">${s.estado}</span></td>
-                    <td>
-                      ${
-                        s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")
-                          ? `
-                        <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">✔ Aprobar RRHH</button>
-                        <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA">✖ Rechazar</button>
-                      `
-                          : `<small>${s.rrhh_usuario || s.respuesta_admin || "Cerrada"}</small>`
-                      }
-                    </td>
-                  </tr>
-                `;
-                    })
-                    .join("")
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>
+    `
+    }
   `;
 }
 
@@ -1371,184 +1755,172 @@ function renderAdminDashboard() {
   `;
 }
 
-// --- VISTA 1: CATÁLOGO DE TURNOS (POR ÁREA O GLOBAL) ---
+// --- VISTA 1: CATÁLOGO DE TURNOS (TABLA ANCHO COMPLETO + DRAWER) ---
 function renderAdminTurnos() {
-  const isSup = STATE.user.role === "supervisor";
-  return `
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title" id="turno-form-title">
-            ${isSup ? `Crear / Editar Turno para ${STATE.user.nombre_area}` : "Crear / Editar Plantilla de Turno"}
-          </div>
-        </div>
-        <form id="form-turno">
-          <input type="hidden" id="turno-id" value="" />
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Nombre del Turno</label>
-              <input type="text" id="turno-nombre" class="form-control" placeholder="Ej: Turno Mañana 06 a 14" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Área del Turno</label>
-              ${
-                isSup
-                  ? `<input type="text" class="form-control" value="${STATE.user.nombre_area}" disabled />
-                     <input type="hidden" id="turno-area" value="${STATE.user.id_area || ""}" />`
-                  : `<select id="turno-area" class="form-control">
-                      <option value="">-- Global (Todas las Áreas) --</option>
-                      ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
-                    </select>`
-              }
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Hora Entrada (24h HH:MM)</label>
-              <input type="time" id="turno-entrada" class="form-control" value="06:00" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Hora Salida (24h HH:MM)</label>
-              <input type="time" id="turno-salida" class="form-control" value="14:00" required />
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Tolerancia llegada tarde (min)</label>
-              <input type="number" id="turno-tolerancia" class="form-control" value="10" min="0" />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Descanso intermedio (min)</label>
-              <input type="number" id="turno-descanso" class="form-control" value="0" min="0" />
-            </div>
-          </div>
-          <div style="display:flex; gap:10px; margin-top:8px;">
-            <button type="submit" class="btn btn-primary" style="flex:1;">💾 Guardar Turno</button>
-            <button type="button" id="btn-limpiar-turno" class="btn btn-outline">Limpiar</button>
-          </div>
-        </form>
-      </div>
+  const qTurno = (STATE.searchTurnos || "").toLowerCase();
+  const turnosFiltrados = STATE.turnos.filter(
+    (t) =>
+      t.nombre.toLowerCase().includes(qTurno) ||
+      (t.nombre_area || "Global").toLowerCase().includes(qTurno) ||
+      `${t.hora_entrada} ${t.hora_salida}`.includes(qTurno)
+  );
+  const diurnos = STATE.turnos.filter((t) => !t.cruza_medianoche).length;
+  const nocturnos = STATE.turnos.filter((t) => t.cruza_medianoche).length;
 
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Turnos Disponibles (${STATE.turnos.length})</div>
+  return `
+    <div class="corp-kpi-strip" style="grid-template-columns: repeat(3, 1fr);">
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("clock", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Turnos Configurados</div>
+          <div class="corp-kpi-mini-val">${STATE.turnos.length}</div>
         </div>
-        <div class="table-responsive">
-          <table>
-            <thead>
+      </div>
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("sun", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Turnos Diurnos</div>
+          <div class="corp-kpi-mini-val">${diurnos}</div>
+        </div>
+      </div>
+      <div class="corp-kpi-mini">
+        <div class="corp-kpi-mini-icon">${icon("moon", 19)}</div>
+        <div>
+          <div class="corp-kpi-mini-label">Turnos Nocturnos</div>
+          <div class="corp-kpi-mini-val">${nocturnos}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="corp-toolbar">
+      <div class="corp-toolbar-left">
+        <div class="corp-search-box">
+          ${icon("search", 16)}
+          <input type="text" id="search-turnos-table" class="form-control" placeholder="Buscar turno por nombre, horario o área..." value="${STATE.searchTurnos || ""}" />
+        </div>
+      </div>
+      <div class="corp-toolbar-right">
+        <button type="button" id="btn-open-new-turno" class="btn btn-primary btn-sm">
+          ${icon("plus", 15)} Nuevo Turno
+        </button>
+      </div>
+    </div>
+
+    <div class="corp-table-card">
+      <div class="table-responsive" style="max-height:calc(100vh - 280px);">
+        <table>
+          <thead>
+            <tr>
+              <th>Nombre del Turno</th>
+              <th>Área</th>
+              <th>Horario</th>
+              <th>Tolerancia</th>
+              <th>Descanso</th>
+              <th>Tipo</th>
+              <th style="width:110px; text-align:right;">Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              turnosFiltrados.length === 0
+                ? `<tr><td colspan="7" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay turnos configurados. Pulsa "Nuevo Turno" para crear uno.</td></tr>`
+                : turnosFiltrados
+                    .map((t) => {
+                      const color = getShiftColor(t.id);
+                      return `
               <tr>
-                <th>Turno</th>
-                <th>Área</th>
-                <th>Horario</th>
-                <th>Tipo</th>
-                <th>Acciones</th>
+                <td>
+                  <span style="display:inline-block; width:10px; height:10px; border-radius:3px; background:${color}; margin-right:8px;"></span>
+                  <strong>${t.nombre}</strong>
+                </td>
+                <td><span class="badge badge-info">${t.nombre_area || "Global"}</span></td>
+                <td><strong>${t.hora_entrada}</strong> — <strong>${t.hora_salida}</strong></td>
+                <td>${t.tolerancia_min ?? 10} min</td>
+                <td>${t.descanso_min ?? 0} min</td>
+                <td>${
+                  t.cruza_medianoche
+                    ? `<span class="badge badge-warn">${icon("moon", 13)} Nocturno</span>`
+                    : `<span class="badge badge-ok">${icon("sun", 13)} Diurno</span>`
+                }</td>
+                <td style="text-align:right;">
+                  <div class="row-actions">
+                    <button type="button" class="icon-btn btn-edit-turno" data-id="${t.id}" title="Editar turno">${icon("pencil", 15)}</button>
+                    <button type="button" class="icon-btn icon-btn-danger btn-del-turno" data-id="${t.id}" title="Eliminar turno">${icon("trash-2", 15)}</button>
+                  </div>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              ${
-                STATE.turnos.length === 0
-                  ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay turnos creados aún.</td></tr>`
-                  : STATE.turnos
-                      .map((t) => {
-                        const color = getShiftColor(t.id);
-                        return `
-                <tr>
-                  <td>
-                    <span style="display:inline-block; width:12px; height:12px; border-radius:4px; background:${color}; margin-right:8px;"></span>
-                    <strong>${t.nombre}</strong>
-                  </td>
-                  <td><span class="badge badge-info">${t.nombre_area || "Global"}</span></td>
-                  <td>${t.hora_entrada} - ${t.hora_salida}</td>
-                  <td>${
-                    t.cruza_medianoche
-                      ? '<span class="badge badge-warn">🌙 Nocturno</span>'
-                      : '<span class="badge badge-ok">☀️ Diurno</span>'
-                  }</td>
-                  <td>
-                    <button type="button" class="btn btn-outline btn-sm btn-edit-turno" data-id="${t.id}">Editar</button>
-                    <button type="button" class="btn btn-danger btn-sm btn-del-turno" data-id="${t.id}">Eliminar</button>
-                  </td>
-                </tr>
-              `;
-                      })
-                      .join("")
-              }
-            </tbody>
-          </table>
-        </div>
+            `;
+                    })
+                    .join("")
+            }
+          </tbody>
+        </table>
       </div>
     </div>
   `;
 }
 
-// --- VISTA 2: DÍAS FESTIVOS ---
+// --- VISTA 2: DÍAS FESTIVOS (TABLA ANCHO COMPLETO + DRAWER) ---
 function renderAdminFestivos() {
   const currentYear = new Date().getFullYear();
+  const qFest = (STATE.searchFestivos || "").toLowerCase();
+  const festivosFiltrados = STATE.festivos.filter(
+    (f) => f.fecha.toLowerCase().includes(qFest) || f.descripcion.toLowerCase().includes(qFest)
+  );
+
   return `
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Registrar Día Festivo</div>
-        </div>
-        <form id="form-festivo">
-          <div class="form-group">
-            <label class="form-label">Fecha Festiva</label>
-            <input type="date" id="festivo-fecha" class="form-control" required />
-          </div>
-          <div class="form-group">
-            <label class="form-label">Descripción / Celebración</label>
-            <input type="text" id="festivo-desc" class="form-control" placeholder="Ej: Día del Trabajo" required />
-          </div>
-          <button type="submit" class="btn btn-primary btn-block">➕ Guardar Día Festivo</button>
-        </form>
-
-        <hr style="margin:22px 0; border:none; border-top:1px solid var(--borde);" />
-
-        <div class="card-title" style="margin-bottom:10px;">Carga Automática Festivos de Colombia</div>
-        <div style="display:flex; gap:10px;">
-          <input type="number" id="festivo-anio-col" class="form-control" value="${currentYear}" min="2020" max="2035" />
-          <button type="button" id="btn-cargar-colombia" class="btn btn-action" style="white-space:nowrap;">
-            🇨🇴 Cargar Festivos Colombia
-          </button>
+    <div class="corp-toolbar">
+      <div class="corp-toolbar-left">
+        <div class="corp-search-box">
+          ${icon("search", 16)}
+          <input type="text" id="search-festivos-table" class="form-control" placeholder="Buscar festivo por fecha o nombre..." value="${STATE.searchFestivos || ""}" />
         </div>
       </div>
+      <div class="corp-toolbar-right">
+        <div style="display:flex; align-items:center; gap:6px;">
+          <input type="number" id="festivo-anio-col" class="form-control" value="${currentYear}" min="2020" max="2035" style="width:92px; height:36px;" />
+          <button type="button" id="btn-cargar-colombia" class="btn btn-outline btn-sm" style="white-space:nowrap;">
+            ${icon("calendar-check-2", 15)} Cargar Colombia
+          </button>
+        </div>
+        <button type="button" id="btn-open-new-festivo" class="btn btn-primary btn-sm">
+          ${icon("calendar-plus", 15)} Nuevo Festivo
+        </button>
+      </div>
+    </div>
 
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Calendario de Festivos (${STATE.festivos.length})</div>
-        </div>
-        <div class="table-responsive" style="max-height:480px;">
-          <table>
-            <thead>
+    <div class="corp-table-card">
+      <div class="table-responsive" style="max-height:calc(100vh - 210px);">
+        <table>
+          <thead>
+            <tr>
+              <th style="width:160px;">Fecha</th>
+              <th>Descripción / Celebración</th>
+              <th style="width:90px; text-align:right;">Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              festivosFiltrados.length === 0
+                ? `<tr><td colspan="3" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay festivos cargados. Pulsa "Cargar Colombia" o "Nuevo Festivo".</td></tr>`
+                : festivosFiltrados
+                    .map(
+                      (f) => `
               <tr>
-                <th>Fecha</th>
-                <th>Descripción</th>
-                <th>Acción</th>
+                <td><strong>${f.fecha}</strong></td>
+                <td>${f.descripcion}</td>
+                <td style="text-align:right;">
+                  <button type="button" class="icon-btn icon-btn-danger btn-del-festivo" data-fecha="${f.fecha}" title="Eliminar festivo">
+                    ${icon("trash-2", 15)}
+                  </button>
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              ${
-                STATE.festivos.length === 0
-                  ? `<tr><td colspan="3" style="text-align:center; padding:22px;">No hay festivos cargados. Pulsa "Cargar Festivos Colombia".</td></tr>`
-                  : STATE.festivos
-                      .map(
-                        (f) => `
-                <tr>
-                  <td><strong>${f.fecha}</strong></td>
-                  <td>${f.descripcion}</td>
-                  <td>
-                    <button type="button" class="btn btn-danger btn-sm btn-del-festivo" data-fecha="${f.fecha}">
-                      Eliminar
-                    </button>
-                  </td>
-                </tr>
-              `
-                      )
-                      .join("")
-              }
-            </tbody>
-          </table>
-        </div>
+            `
+                    )
+                    .join("")
+            }
+          </tbody>
+        </table>
       </div>
     </div>
   `;
@@ -1844,7 +2216,7 @@ function renderAdminAsignacion() {
 }
 
 // ============================================================================
-// 4. PROCESAR HUELLERO Y GENERAR REPORTES (INDIVIDUALES O AGRUPADOS POR ÁREA)
+// 4. PROCESAR HUELLERO Y GENERAR REPORTES (TABS: VALIDAR HUELLERO | REPORTES)
 // Disponible para: Supervisor (su Área), Auditor de Horas Extras (Todas) y Talento Humano (Administrativos o Todas)
 // ============================================================================
 
@@ -1855,6 +2227,7 @@ function renderAdminProcesar() {
   const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
   const prev = STATE.huelleroPreview;
   const isSup = STATE.user.role === "supervisor";
+  const tab = STATE.procesarTab || "validar";
 
   const selectedArea = isSup ? String(STATE.user.id_area || "") : STATE.huelleroFiltroArea;
   const empleadosDelArea = STATE.empleados.filter(
@@ -1862,21 +2235,29 @@ function renderAdminProcesar() {
   );
 
   return `
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">
-            ⚙️ Validar Horas Extras con Huellero y Generar Reportes (Individual o Agrupado)
-          </div>
-        </div>
+    <div class="corp-tabs-bar">
+      <div class="corp-tabs">
+        <button type="button" class="corp-tab ${tab === "validar" ? "active" : ""}" data-proc-tab="validar">
+          ${icon("file-spreadsheet", 16)} Validar Huellero y Generar Reporte
+        </button>
+        <button type="button" class="corp-tab ${tab === "reportes" ? "active" : ""}" data-proc-tab="reportes">
+          ${icon("folder-down", 16)} Reportes Excel Generados <span class="corp-tab-count">${STATE.reportes.length}</span>
+        </button>
+      </div>
+    </div>
+
+    ${
+      tab === "validar"
+        ? `
+      <div class="card" style="max-width:880px;">
         <form id="form-procesar-huellero">
-          <div id="huellero-dropzone" class="dropzone-box">
-            <div style="font-size:2.2rem; margin-bottom:6px;">📂</div>
-            <div style="font-weight:800; font-size:1rem; color:var(--petroleo);">
-              Arrastra y suelta aquí el Excel del Huellero (.xlsx / .xls)
+          <div id="huellero-dropzone" class="dropzone-box" style="padding:22px 18px; margin-bottom:16px;">
+            <div style="margin-bottom:6px; color:var(--petroleo);">${icon("upload-cloud", 32)}</div>
+            <div style="font-weight:700; font-size:0.95rem; color:var(--petroleo);">
+              Arrastra y suelta aquí el Excel del Huellero (.xlsx / .xls) o haz clic para seleccionar
             </div>
-            <div style="font-size:0.83rem; color:var(--texto-sec); margin-top:4px;">
-              El huellero solo se usa para cruzar marcaciones contra los turnos programados
+            <div style="font-size:0.8rem; color:var(--texto-sec); margin-top:4px;">
+              Se cruzarán las marcaciones biométricas contra los turnos programados del período
             </div>
             <input type="file" id="proc-files" accept=".xlsx,.xls" multiple style="display:none;" />
           </div>
@@ -1884,9 +2265,9 @@ function renderAdminProcesar() {
           ${
             prev
               ? `
-            <div class="alert-banner alert-ok" style="flex-direction:column; align-items:flex-start;">
+            <div class="alert-banner alert-ok" style="margin-bottom:16px;">
               <div>
-                <strong>✅ Vista Previa del Huellero:</strong> ${prev.total_marcaciones} marcaciones detectadas (${prev.fecha_min || "—"} al ${prev.fecha_max || "—"}).
+                <strong>${icon("check-circle-2", 16)} Archivo cargado:</strong> ${prev.total_marcaciones} marcaciones detectadas (${prev.fecha_min || "—"} al ${prev.fecha_max || "—"}).
               </div>
             </div>
           `
@@ -1901,7 +2282,7 @@ function renderAdminProcesar() {
                   ? `<input type="text" class="form-control" value="${STATE.user.nombre_area}" disabled />
                      <input type="hidden" id="proc-area" value="${STATE.user.id_area || ""}" />`
                   : `<select id="proc-area" class="form-control">
-                      <option value="">🏢 Todas las Áreas (Consolidado)</option>
+                      <option value="">Todas las Áreas (Consolidado)</option>
                       ${STATE.areas
                         .map(
                           (a) =>
@@ -1914,11 +2295,11 @@ function renderAdminProcesar() {
             <div class="form-group">
               <label class="form-label">2. Tipo de Reporte (Agrupado o Individual)</label>
               <select id="proc-empleado" class="form-control">
-                <option value="TODOS">👥 Agrupado (Todos los empleados del área)</option>
+                <option value="TODOS">Agrupado (Todos los empleados del área)</option>
                 ${empleadosDelArea
                   .map(
                     (e) =>
-                      `<option value="${e.id_empleado}" ${STATE.huelleroFiltroEmpleado === e.id_empleado ? "selected" : ""}>👤 Individual: ${e.id_empleado} - ${e.nombre}</option>`
+                      `<option value="${e.id_empleado}" ${STATE.huelleroFiltroEmpleado === e.id_empleado ? "selected" : ""}>Individual: ${e.id_empleado} - ${e.nombre}</option>`
                   )
                   .join("")}
               </select>
@@ -1936,56 +2317,56 @@ function renderAdminProcesar() {
             </div>
           </div>
 
-          <div class="grid-3">
-            <div class="form-group">
-              <label class="form-label">Columna ID (Resp: A)</label>
-              <input type="text" id="proc-col-id" class="form-control" value="ID_Empleado" />
+          <details style="margin-bottom:14px; border:1px solid var(--borde); border-radius:10px; padding:10px 14px; background:var(--superficie-sec);">
+            <summary style="font-size:0.82rem; font-weight:700; color:var(--texto-sec); cursor:pointer;">Opciones avanzadas de columnas del Excel y marcaciones</summary>
+            <div class="grid-3" style="margin-top:12px;">
+              <div class="form-group" style="margin-bottom:8px;">
+                <label class="form-label">Columna ID (Resp: A)</label>
+                <input type="text" id="proc-col-id" class="form-control" value="ID_Empleado" />
+              </div>
+              <div class="form-group" style="margin-bottom:8px;">
+                <label class="form-label">Columna Fecha (Resp: C)</label>
+                <input type="text" id="proc-col-fecha" class="form-control" value="Fecha" />
+              </div>
+              <div class="form-group" style="margin-bottom:8px;">
+                <label class="form-label">Columna Hora (Resp: D)</label>
+                <input type="text" id="proc-col-hora" class="form-control" value="Hora" />
+              </div>
             </div>
-            <div class="form-group">
-              <label class="form-label">Columna Fecha (Resp: C)</label>
-              <input type="text" id="proc-col-fecha" class="form-control" value="Fecha" />
+            <div style="display:flex; gap:18px; flex-wrap:wrap; margin-top:6px;">
+              <label style="display:flex; align-items:center; gap:8px; font-size:0.84rem; font-weight:600; cursor:pointer;">
+                <input type="checkbox" id="proc-incluir-app" checked />
+                Integrar marcaciones de App Móvil (Reloj GPS)
+              </label>
+              <label style="display:flex; align-items:center; gap:8px; font-size:0.84rem; font-weight:600; cursor:pointer;">
+                <input type="checkbox" id="proc-no-programados" checked />
+                Incluir auditoría de horas no programadas
+              </label>
             </div>
-            <div class="form-group">
-              <label class="form-label">Columna Hora (Resp: D)</label>
-              <input type="text" id="proc-col-hora" class="form-control" value="Hora" />
-            </div>
-          </div>
+          </details>
 
-          <div class="form-group">
-            <label style="display:flex; align-items:center; gap:8px; font-weight:600; cursor:pointer; margin-bottom:6px;">
-              <input type="checkbox" id="proc-incluir-app" checked />
-              Integrar marcaciones realizadas desde la App de Celular (Reloj GPS)
-            </label>
-            <label style="display:flex; align-items:center; gap:8px; font-weight:600; cursor:pointer;">
-              <input type="checkbox" id="proc-no-programados" checked />
-              Incluir auditoría de horas no programadas
-            </label>
-          </div>
-
-          <button type="submit" id="btn-submit-procesar" class="btn btn-action btn-block" style="padding:14px; font-size:1rem;">
-            ⚙️ Validar Horas Extras y Generar Reporte Excel
+          <button type="submit" id="btn-submit-procesar" class="btn btn-primary btn-block" style="padding:12px; font-size:0.95rem;">
+            ${icon("play", 16)} Validar Horas Extras y Generar Reporte Excel
           </button>
         </form>
       </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">📥 Reportes Excel Generados (${STATE.reportes.length})</div>
-        </div>
-        <div class="table-responsive">
+    `
+        : `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
           <table>
             <thead>
               <tr>
                 <th>Archivo Excel</th>
-                <th>Fecha</th>
+                <th>Fecha de Generación</th>
                 <th>Tamaño</th>
-                <th>Descargar</th>
+                <th style="width:130px; text-align:right;">Descargar</th>
               </tr>
             </thead>
             <tbody>
               ${
                 STATE.reportes.length === 0
-                  ? `<tr><td colspan="4" style="text-align:center; padding:24px;">Aún no hay reportes generados. Puedes generarlos desde el panel izquierdo ahora mismo.</td></tr>`
+                  ? `<tr><td colspan="4" style="text-align:center; padding:28px; color:var(--texto-sec);">Aún no hay reportes generados. Ve a la pestaña "Validar Huellero y Generar Reporte".</td></tr>`
                   : STATE.reportes
                       .map(
                         (r) => `
@@ -1993,8 +2374,8 @@ function renderAdminProcesar() {
                     <td><strong>${r.nombre}</strong></td>
                     <td>${r.fecha}</td>
                     <td>${r.tamano_kb} KB</td>
-                    <td>
-                      <a href="${r.url}" download class="btn btn-primary btn-sm">⬇️ Descargar</a>
+                    <td style="text-align:right;">
+                      <a href="${r.url}" download class="btn btn-primary btn-sm">${icon("download", 14)} Descargar</a>
                     </td>
                   </tr>
                 `
@@ -2005,7 +2386,8 @@ function renderAdminProcesar() {
           </table>
         </div>
       </div>
-    </div>
+    `
+    }
   `;
 }
 
@@ -2378,89 +2760,51 @@ function initAnalisisCharts() {
 }
 
 // ============================================================================
-// 6. BASE DE DATOS DE EMPLEADOS LIGADOS A SU ÁREA (SEPARADA DEL HUELLERO)
+// 6. BASE DE DATOS DE EMPLEADOS (TABLA ANCHO COMPLETO + FILTRO ÁREA + DRAWERS)
 // ============================================================================
 
 function renderAdminEmpleados() {
   const qEmp = (STATE.searchEmpleados || "").toLowerCase();
-  const empleadosFiltrados = STATE.empleados.filter(
-    (e) =>
+  const areaFilter = STATE.filtroAreaEmpleados || "";
+  const empleadosFiltrados = STATE.empleados.filter((e) => {
+    const matchText =
       e.id_empleado.toLowerCase().includes(qEmp) ||
       e.nombre.toLowerCase().includes(qEmp) ||
       (e.nombre_area || "").toLowerCase().includes(qEmp) ||
-      (e.cargo || "").toLowerCase().includes(qEmp)
-  );
+      (e.cargo || "").toLowerCase().includes(qEmp);
+    const matchArea = !areaFilter || String(e.id_area || "") === String(areaFilter);
+    return matchText && matchArea;
+  });
 
   return `
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">${icon("file-spreadsheet", 18)} <span>Importar Base de Datos de Empleados por Área (Excel)</span></div>
+    <div class="corp-toolbar">
+      <div class="corp-toolbar-left">
+        <div class="corp-search-box">
+          ${icon("search", 16)}
+          <input type="text" id="search-empleados-table" class="form-control" placeholder="Buscar por ID, nombre, cargo..." value="${STATE.searchEmpleados || ""}" />
         </div>
-        <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:10px;">
-          Esta base de empleados es independiente del huellero. Puedes subir un Excel con columnas: <code>ID | Nombre | Área | Cargo | PIN</code> o seleccionar un Área por defecto abajo.
-        </p>
-        <div class="form-group">
-          <label class="form-label">Área por defecto para los empleados del archivo (si el Excel no trae columna Área)</label>
-          <select id="import-emp-area-default" class="form-control">
-            <option value="">-- Detectar columna Área del Excel --</option>
-            ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
-          </select>
-        </div>
-        <div id="emp-dropzone" class="dropzone-box" style="padding:18px;">
-          <div style="margin-bottom:6px; color:var(--petroleo);">${icon("upload-cloud", 32)}</div>
-          <div style="font-weight:800; color:var(--petroleo);">
-            Arrastra aquí el Excel de Empleados (.xlsx / .xls) o haz clic para subir
-          </div>
-          <input type="file" id="import-emp-excel" accept=".xlsx,.xls" style="display:none;" />
-        </div>
+        <select id="filter-area-empleados" class="form-control" style="width:auto; min-width:190px; height:38px; font-size:0.86rem;">
+          <option value="">Todas las Áreas (${STATE.empleados.length})</option>
+          ${STATE.areas
+            .map(
+              (a) =>
+                `<option value="${a.id}" ${String(areaFilter) === String(a.id) ? "selected" : ""}>${a.nombre} (${a.total_empleados})</option>`
+            )
+            .join("")}
+        </select>
       </div>
-
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">${icon("user-plus", 18)} <span>Registrar / Actualizar Empleado y su Área</span></div>
-        </div>
-        <form id="form-empleado">
-          <div class="grid-3">
-            <div class="form-group">
-              <label class="form-label">ID / Código Biométrico</label>
-              <input type="text" id="emp-id" class="form-control" placeholder="Ej: 141 o 00000002" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Área Asignada</label>
-              <select id="emp-area" class="form-control" required>
-                <option value="">-- Seleccione Área --</option>
-                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
-              </select>
-            </div>
-            <div class="form-group">
-              <label class="form-label">PIN App Móvil</label>
-              <input type="text" id="emp-pin" class="form-control" value="1234" required />
-            </div>
-          </div>
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Nombre Completo</label>
-              <input type="text" id="emp-nombre" class="form-control" placeholder="Apellidos y Nombres" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Cargo / Puesto</label>
-              <input type="text" id="emp-cargo" class="form-control" value="Operario" />
-            </div>
-          </div>
-          <button type="submit" class="btn btn-primary btn-block">${icon("save", 16)} Guardar Empleado en Base de Datos</button>
-        </form>
+      <div class="corp-toolbar-right">
+        <button type="button" id="btn-open-import-emp" class="btn btn-outline btn-sm">
+          ${icon("file-spreadsheet", 15)} Importar Excel
+        </button>
+        <button type="button" id="btn-open-new-emp" class="btn btn-primary btn-sm">
+          ${icon("user-plus", 15)} Nuevo Empleado
+        </button>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">${icon("users", 18)} <span>Directorio Maestro de Empleados (${empleadosFiltrados.length} / ${STATE.empleados.length})</span></div>
-        <div class="search-input-wrap">
-          <input type="text" id="search-empleados-table" class="form-control" placeholder="Buscar por ID, nombre, área o cargo..." value="${STATE.searchEmpleados || ""}" />
-        </div>
-      </div>
-      <div class="table-responsive" style="max-height:460px;">
+    <div class="corp-table-card">
+      <div class="table-responsive" style="max-height:calc(100vh - 210px);">
         <table>
           <thead>
             <tr>
@@ -2469,13 +2813,13 @@ function renderAdminEmpleados() {
               <th>Área Asignada</th>
               <th>Cargo</th>
               <th>PIN App</th>
-              <th>Acciones</th>
+              <th style="width:110px; text-align:right;">Acciones</th>
             </tr>
           </thead>
           <tbody>
             ${
               empleadosFiltrados.length === 0
-                ? `<tr><td colspan="6" style="text-align:center; padding:22px;">No hay empleados que coincidan con la búsqueda.</td></tr>`
+                ? `<tr><td colspan="6" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay empleados que coincidan con el filtro.</td></tr>`
                 : empleadosFiltrados
                     .map(
                       (e) => `
@@ -2485,9 +2829,11 @@ function renderAdminEmpleados() {
                 <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
                 <td>${e.cargo || "Operario"}</td>
                 <td><code>${e.pin || "1234"}</code></td>
-                <td>
-                  <button type="button" class="btn btn-outline btn-sm btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-pin="${e.pin || "1234"}" data-area="${e.id_area || ""}">${icon("pencil", 14)} Editar</button>
-                  <button type="button" class="btn btn-danger btn-sm btn-del-emp" data-id="${e.id_empleado}">${icon("trash-2", 14)} Eliminar</button>
+                <td style="text-align:right;">
+                  <div class="row-actions">
+                    <button type="button" class="icon-btn btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-pin="${e.pin || "1234"}" data-area="${e.id_area || ""}" title="Editar empleado">${icon("pencil", 15)}</button>
+                    <button type="button" class="icon-btn icon-btn-danger btn-del-emp" data-id="${e.id_empleado}" title="Eliminar empleado">${icon("trash-2", 15)}</button>
+                  </div>
                 </td>
               </tr>
             `
@@ -2502,147 +2848,163 @@ function renderAdminEmpleados() {
 }
 
 // ============================================================================
-// 7. MAPA GPS Y PERMISOS (CON AVAL DE SUPERVISOR -> TALENTO HUMANO)
+// 7. MAPA GPS Y PERMISOS (TABS: PERMISOS DEL EQUIPO | MAPA GPS EN VIVO)
 // ============================================================================
 
 function renderGpsYSolicitudes() {
   const role = STATE.user.role;
   const isSup = role === "supervisor";
   const isRRHH = role === "talento_humano" || role === "superadmin";
+  const tab = STATE.gpsTab || "permisos";
 
   return `
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">
-          📝 Solicitudes de Permisos (${isSup ? `Mi Área: ${STATE.user.nombre_area}` : "Todas las Áreas"}) (${STATE.solicitudes.length})
+    <div class="corp-tabs-bar">
+      <div class="corp-tabs">
+        <button type="button" class="corp-tab ${tab === "permisos" ? "active" : ""}" data-gps-tab="permisos">
+          ${icon("file-text", 16)} Solicitudes de Permisos <span class="corp-tab-count">${STATE.solicitudes.length}</span>
+        </button>
+        <button type="button" class="corp-tab ${tab === "mapa" ? "active" : ""}" data-gps-tab="mapa">
+          ${icon("map-pin", 16)} Mapa GPS y Marcaciones Móviles <span class="corp-tab-count">${STATE.marcacionesMoviles.length}</span>
+        </button>
+      </div>
+    </div>
+
+    ${
+      tab === "permisos"
+        ? `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
+          <table>
+            <thead>
+              <tr>
+                <th>Empleado / Área</th>
+                <th>Tipo / Fechas</th>
+                <th>Motivo</th>
+                <th>Estado del Flujo</th>
+                <th style="text-align:right;">Acción</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.solicitudes.length === 0
+                  ? `<tr><td colspan="5" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay solicitudes de permisos registradas.</td></tr>`
+                  : STATE.solicitudes
+                      .map((s) => {
+                        let badge = "badge-warn";
+                        if (s.estado === "APROBADA") badge = "badge-ok";
+                        else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
+                        else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
+
+                        let accionesHtml = `<small style="color:var(--texto-sec);">${s.respuesta_admin || s.respuesta_supervisor || "En trámite"}</small>`;
+                        if (isSup && s.estado === "PENDIENTE_SUPERVISOR") {
+                          accionesHtml = `
+                            <div class="row-actions">
+                              <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="AVALADO_SUPERVISOR">
+                                ${icon("check", 14)} Avalar
+                              </button>
+                              <button type="button" class="icon-btn icon-btn-danger btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA_SUPERVISOR" title="Rechazar">
+                                ${icon("x", 15)}
+                              </button>
+                            </div>
+                          `;
+                        } else if (isRRHH && s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")) {
+                          accionesHtml = `
+                            <div class="row-actions">
+                              <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">
+                                ${icon("check", 14)} Aprobar RRHH
+                              </button>
+                              <button type="button" class="icon-btn icon-btn-danger btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA" title="Rechazar">
+                                ${icon("x", 15)}
+                              </button>
+                            </div>
+                          `;
+                        }
+
+                        return `
+                    <tr>
+                      <td>
+                        <strong>${s.nombre_empleado}</strong> <small style="color:var(--texto-sec);">(${s.id_empleado})</small><br/>
+                        <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
+                      </td>
+                      <td><strong>${s.tipo}</strong><br/><small style="color:var(--texto-sec);">${s.fecha_inicio} a ${s.fecha_fin}</small></td>
+                      <td>${s.motivo}</td>
+                      <td><span class="badge ${badge}">${s.estado}</span></td>
+                      <td style="text-align:right;">${accionesHtml}</td>
+                    </tr>
+                  `;
+                      })
+                      .join("")
+              }
+            </tbody>
+          </table>
         </div>
       </div>
-      <div class="table-responsive" style="max-height:380px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Empleado / Área</th>
-              <th>Tipo / Fechas</th>
-              <th>Motivo</th>
-              <th>Estado del Flujo</th>
-              <th>Acción</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${
-              STATE.solicitudes.length === 0
-                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay solicitudes de permisos registradas.</td></tr>`
-                : STATE.solicitudes
-                    .map((s) => {
-                      let badge = "badge-warn";
-                      if (s.estado === "APROBADA") badge = "badge-ok";
-                      else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
-                      else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
+    `
+        : `
+      <div class="card" style="padding:14px; margin-bottom:16px;">
+        <div id="gps-leaflet-map" class="gps-map-container" style="margin-bottom:0;"></div>
+      </div>
 
-                      let accionesHtml = `<small>${s.respuesta_admin || s.respuesta_supervisor || "En trámite"}</small>`;
-                      if (isSup && s.estado === "PENDIENTE_SUPERVISOR") {
-                        accionesHtml = `
-                          <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="AVALADO_SUPERVISOR">
-                            ✔ Avalar y Pasar a Talento Humano
-                          </button>
-                          <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA_SUPERVISOR">
-                            ✖ Rechazar
-                          </button>
-                        `;
-                      } else if (isRRHH && s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")) {
-                        accionesHtml = `
-                          <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">
-                            ✔ Aprobación Final RRHH
-                          </button>
-                          <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA">
-                            ✖ Rechazar
-                          </button>
-                        `;
-                      }
-
-                      return `
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:360px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Fecha y Hora</th>
+                <th>Empleado / Área</th>
+                <th>Tipo</th>
+                <th>Evidencia / Nota</th>
+                <th>Dirección Física</th>
+                <th>Coordenadas</th>
+                <th style="text-align:right;">Mapa</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.marcacionesMoviles.length === 0
+                  ? `<tr><td colspan="7" style="text-align:center; padding:28px; color:var(--texto-sec);">Aún no hay marcaciones registradas desde celulares.</td></tr>`
+                  : STATE.marcacionesMoviles
+                      .map(
+                        (m) => `
                   <tr>
+                    <td><strong>${m.fecha_hora}</strong></td>
                     <td>
-                      <strong>${s.nombre_empleado}</strong> (ID: ${s.id_empleado})<br/>
-                      <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
+                      <strong>${m.nombre_empleado}</strong> <small style="color:var(--texto-sec);">(${m.id_empleado})</small><br/>
+                      <span class="badge badge-info">${m.nombre_area || "Sin Área"}</span>
                     </td>
-                    <td><strong>${s.tipo}</strong><br/><small>${s.fecha_inicio} a ${s.fecha_fin}</small></td>
-                    <td>${s.motivo}</td>
-                    <td><span class="badge ${badge}">${s.estado}</span></td>
-                    <td>${accionesHtml}</td>
-                  </tr>
-                `;
-                    })
-                    .join("")
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">🗺️ Mapa Interactivo en Vivo de Marcaciones GPS (${STATE.marcacionesMoviles.length})</div>
-      </div>
-      <div id="gps-leaflet-map" class="gps-map-container"></div>
-
-      <div class="table-responsive" style="max-height:380px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Fecha y Hora</th>
-              <th>Empleado / Área</th>
-              <th>Tipo</th>
-              <th>Evidencia / Nota</th>
-              <th>Dirección Física Detectada</th>
-              <th>Coordenadas GPS</th>
-              <th>Mapa</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${
-              STATE.marcacionesMoviles.length === 0
-                ? `<tr><td colspan="7" style="text-align:center; padding:22px;">Aún no hay marcaciones registradas desde celulares.</td></tr>`
-                : STATE.marcacionesMoviles
-                    .map(
-                      (m) => `
-                <tr>
-                  <td><strong>${m.fecha_hora}</strong></td>
-                  <td>
-                    <strong>${m.nombre_empleado}</strong> (ID: ${m.id_empleado})<br/>
-                    <span class="badge badge-info">${m.nombre_area || "Sin Área"}</span>
-                  </td>
-                  <td><span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span></td>
-                  <td>
-                    ${
-                      m.foto_base64
-                        ? `<img src="${m.foto_base64}" alt="Selfie" style="width:44px; height:44px; object-fit:cover; border-radius:8px; border:1px solid var(--borde); display:block; margin-bottom:4px;" />`
-                        : ""
-                    }
-                    <small>${m.observaciones || "—"}</small>
-                  </td>
-                  <td><strong>${m.direccion || "Sin dirección registrada"}</strong></td>
-                  <td>${
-                    m.latitud != null && m.longitud != null
-                      ? `<code>${m.latitud}, ${m.longitud}</code> (±${m.precision_m || 0}m)`
-                      : "Sin coordenadas"
-                  }</td>
-                  <td>
-                    ${
+                    <td><span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span></td>
+                    <td>
+                      ${
+                        m.foto_base64
+                          ? `<img src="${m.foto_base64}" alt="Selfie" style="width:40px; height:40px; object-fit:cover; border-radius:8px; border:1px solid var(--borde); display:block; margin-bottom:4px;" />`
+                          : ""
+                      }
+                      <small>${m.observaciones || "—"}</small>
+                    </td>
+                    <td><strong>${m.direccion || "Sin dirección"}</strong></td>
+                    <td>${
                       m.latitud != null && m.longitud != null
-                        ? `<a href="https://www.google.com/maps?q=${m.latitud},${m.longitud}" target="_blank" class="btn btn-outline btn-sm">🗺️ Google Maps</a>`
+                        ? `<code>${m.latitud}, ${m.longitud}</code> <small>(±${m.precision_m || 0}m)</small>`
                         : "—"
-                    }
-                  </td>
-                </tr>
-              `
-                    )
-                    .join("")
-            }
-          </tbody>
-        </table>
+                    }</td>
+                    <td style="text-align:right;">
+                      ${
+                        m.latitud != null && m.longitud != null
+                          ? `<a href="https://www.google.com/maps?q=${m.latitud},${m.longitud}" target="_blank" class="btn btn-outline btn-sm">${icon("external-link", 14)} Ver</a>`
+                          : "—"
+                      }
+                    </td>
+                  </tr>
+                `
+                      )
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
       </div>
-    </div>
+    `
+    }
   `;
 }
 
@@ -2734,7 +3096,83 @@ function bindManagementEvents() {
     }
   });
 
-  // --- Eventos Gestión de Áreas (Superadmin) ---
+  // --- Eventos Drawer / Modal Corporativo Global ---
+  document.getElementById("btn-close-drawer")?.addEventListener("click", closeDrawer);
+  document.getElementById("btn-cancel-drawer")?.addEventListener("click", closeDrawer);
+  document.getElementById("drawer-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "drawer-backdrop") closeDrawer();
+  });
+
+  // --- Eventos Pestañas y Acciones Superadmin (Áreas y Usuarios) ---
+  document.querySelectorAll("[data-sa-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.superadminTab = btn.dataset.saTab;
+      renderApp();
+    });
+  });
+
+  document.getElementById("btn-open-new-area")?.addEventListener("click", () => openDrawer("area", null));
+  document.getElementById("btn-open-new-usr")?.addEventListener("click", () => openDrawer("usuario", null));
+
+  document.querySelectorAll(".btn-edit-area").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      openDrawer("area", {
+        id: btn.dataset.id,
+        nombre: btn.dataset.nombre,
+        descripcion: btn.dataset.desc
+      });
+    });
+  });
+
+  document.querySelectorAll(".btn-del-area").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/areas/eliminar", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(btn.dataset.id) })
+        });
+        showToast("Área eliminada", "info");
+        await Promise.all([loadAreas(), loadUsuarios(), loadEmpleados()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
+
+  document.querySelectorAll(".btn-edit-usr").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const u = STATE.usuarios.find((x) => x.username === btn.dataset.user);
+      if (u) openDrawer("usuario", u);
+    });
+  });
+
+  document.querySelectorAll(".btn-del-usr").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/usuarios/eliminar", {
+          method: "POST",
+          body: JSON.stringify({ username: btn.dataset.user })
+        });
+        showToast("Usuario eliminado", "info");
+        await Promise.all([loadUsuarios(), loadAreas()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
+
+  document.getElementById("search-usuarios-table")?.addEventListener("input", (e) => {
+    STATE.searchUsuarios = e.target.value;
+    renderApp();
+    const input = document.getElementById("search-usuarios-table");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
+
   const formArea = document.getElementById("form-area");
   if (formArea) {
     formArea.addEventListener("submit", async (e) => {
@@ -2749,45 +3187,16 @@ function bindManagementEvents() {
           })
         });
         showToast("Área guardada correctamente", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadAreas(), loadUsuarios(), loadEmpleados()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
       }
     });
-
-    document.getElementById("btn-limpiar-area")?.addEventListener("click", () => {
-      document.getElementById("area-id").value = "";
-      document.getElementById("area-nombre").value = "";
-      document.getElementById("area-desc").value = "";
-    });
-
-    document.querySelectorAll(".btn-edit-area").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        document.getElementById("area-id").value = btn.dataset.id;
-        document.getElementById("area-nombre").value = btn.dataset.nombre;
-        document.getElementById("area-desc").value = btn.dataset.desc;
-      });
-    });
-
-    document.querySelectorAll(".btn-del-area").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await apiFetch("/api/areas/eliminar", {
-            method: "POST",
-            body: JSON.stringify({ id: Number(btn.dataset.id) })
-          });
-          showToast("Área eliminada", "info");
-          await Promise.all([loadAreas(), loadUsuarios(), loadEmpleados()]);
-          renderApp();
-        } catch (err) {
-          showToast(err.message, "error");
-        }
-      });
-    });
   }
 
-  // --- Eventos Usuarios del Sistema (Superadmin) ---
   const formUsr = document.getElementById("form-usuario-sistema");
   if (formUsr) {
     formUsr.addEventListener("submit", async (e) => {
@@ -2804,59 +3213,32 @@ function bindManagementEvents() {
           })
         });
         showToast("Usuario guardado correctamente", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadUsuarios(), loadAreas()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
       }
     });
-
-    document.getElementById("btn-limpiar-usr")?.addEventListener("click", () => {
-      document.getElementById("usr-username").value = "";
-      document.getElementById("usr-nombre").value = "";
-      document.getElementById("usr-password").value = "";
-      document.getElementById("usr-rol").value = "supervisor";
-      document.getElementById("usr-area").value = "";
-    });
-
-    document.querySelectorAll(".btn-edit-usr").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const u = STATE.usuarios.find((x) => x.username === btn.dataset.user);
-        if (!u) return;
-        document.getElementById("usr-username").value = u.username;
-        document.getElementById("usr-nombre").value = u.nombre;
-        document.getElementById("usr-rol").value = u.rol;
-        document.getElementById("usr-area").value = u.id_area || "";
-        document.getElementById("usr-password").placeholder = "Nueva contraseña";
-      });
-    });
-
-    document.querySelectorAll(".btn-del-usr").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await apiFetch("/api/usuarios/eliminar", {
-            method: "POST",
-            body: JSON.stringify({ username: btn.dataset.user })
-          });
-          showToast("Usuario eliminado", "info");
-          await Promise.all([loadUsuarios(), loadAreas()]);
-          renderApp();
-        } catch (err) {
-          showToast(err.message, "error");
-        }
-      });
-    });
-
-    document.getElementById("search-usuarios-table")?.addEventListener("input", (e) => {
-      STATE.searchUsuarios = e.target.value;
-      renderApp();
-      const input = document.getElementById("search-usuarios-table");
-      if (input) {
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
-      }
-    });
   }
+
+  // --- Eventos Pestañas Talento Humano y Admin General Estructura ---
+  document.querySelectorAll("[data-rrhh-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.rrhhTab = btn.dataset.rrhhTab;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-est-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.adminEstructuraTab = btn.dataset.estTab;
+      renderApp();
+    });
+  });
+
+  document.getElementById("btn-open-new-comunicado")?.addEventListener("click", () => openDrawer("comunicado", null));
 
   // --- Eventos Talento Humano: Memorandos y Reporte de Permisos ---
   const formCom = document.getElementById("form-comunicado");
@@ -2884,7 +3266,9 @@ function bindManagementEvents() {
             autor: STATE.user.nombre
           })
         });
-        showToast("🔔 Memorando enviado y notificado en tiempo real", "success");
+        showToast("Memorando enviado y notificado en tiempo real", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadComunicados(), loadNotificaciones(false)]);
         renderApp();
       } catch (err) {
@@ -2907,7 +3291,57 @@ function bindManagementEvents() {
     }
   });
 
-  // --- Eventos Catálogo Turnos ---
+  // --- Eventos Pestañas de Procesar Huellero y Permisos/GPS ---
+  document.querySelectorAll("[data-proc-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.procesarTab = btn.dataset.procTab;
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll("[data-gps-tab]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      STATE.gpsTab = btn.dataset.gpsTab;
+      renderApp();
+    });
+  });
+
+  // --- Eventos Catálogo Turnos (Tabla completa + Drawer) ---
+  document.getElementById("btn-open-new-turno")?.addEventListener("click", () => openDrawer("turno", null));
+
+  document.getElementById("search-turnos-table")?.addEventListener("input", (e) => {
+    STATE.searchTurnos = e.target.value;
+    renderApp();
+    const input = document.getElementById("search-turnos-table");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
+
+  document.querySelectorAll(".btn-edit-turno").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const t = STATE.turnos.find((x) => String(x.id) === String(btn.dataset.id));
+      if (t) openDrawer("turno", t);
+    });
+  });
+
+  document.querySelectorAll(".btn-del-turno").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/turnos/eliminar", {
+          method: "POST",
+          body: JSON.stringify({ id: Number(btn.dataset.id) })
+        });
+        showToast("Turno eliminado", "info");
+        await Promise.all([loadTurnos(), loadDashboard()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
+
   const formTurno = document.getElementById("form-turno");
   if (formTurno) {
     formTurno.addEventListener("submit", async (e) => {
@@ -2933,51 +3367,60 @@ function bindManagementEvents() {
           })
         });
         showToast("Turno guardado correctamente", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadTurnos(), loadDashboard()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
       }
     });
-
-    document.getElementById("btn-limpiar-turno")?.addEventListener("click", () => {
-      document.getElementById("turno-id").value = "";
-      document.getElementById("turno-nombre").value = "";
-    });
-
-    document.querySelectorAll(".btn-edit-turno").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const t = STATE.turnos.find((x) => String(x.id) === String(btn.dataset.id));
-        if (!t) return;
-        document.getElementById("turno-id").value = t.id;
-        document.getElementById("turno-nombre").value = t.nombre;
-        document.getElementById("turno-entrada").value = t.hora_entrada;
-        document.getElementById("turno-salida").value = t.hora_salida;
-        document.getElementById("turno-tolerancia").value = t.tolerancia_min;
-        document.getElementById("turno-descanso").value = t.descanso_min;
-        const areaEl = document.getElementById("turno-area");
-        if (areaEl && areaEl.tagName === "SELECT") areaEl.value = t.id_area || "";
-      });
-    });
-
-    document.querySelectorAll(".btn-del-turno").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await apiFetch("/api/turnos/eliminar", {
-            method: "POST",
-            body: JSON.stringify({ id: Number(btn.dataset.id) })
-          });
-          showToast("Turno eliminado", "info");
-          await Promise.all([loadTurnos(), loadDashboard()]);
-          renderApp();
-        } catch (err) {
-          showToast(err.message, "error");
-        }
-      });
-    });
   }
 
   // --- Eventos Festivos ---
+  document.getElementById("btn-open-new-festivo")?.addEventListener("click", () => openDrawer("festivo", null));
+
+  document.getElementById("search-festivos-table")?.addEventListener("input", (e) => {
+    STATE.searchFestivos = e.target.value;
+    renderApp();
+    const input = document.getElementById("search-festivos-table");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
+
+  document.getElementById("btn-cargar-colombia")?.addEventListener("click", async () => {
+    try {
+      const anio = Number(document.getElementById("festivo-anio-col").value);
+      const res = await apiFetch("/api/festivos/cargar-colombia", {
+        method: "POST",
+        body: JSON.stringify({ anio })
+      });
+      showToast(`Se cargaron ${res.cantidad} festivos de Colombia (${res.anio})`, "success");
+      await loadFestivos();
+      renderApp();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
+
+  document.querySelectorAll(".btn-del-festivo").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/festivos/eliminar", {
+          method: "POST",
+          body: JSON.stringify({ fecha: btn.dataset.fecha })
+        });
+        showToast("Festivo eliminado", "info");
+        await loadFestivos();
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
+
   const formFestivo = document.getElementById("form-festivo");
   if (formFestivo) {
     formFestivo.addEventListener("submit", async (e) => {
@@ -2991,42 +3434,13 @@ function bindManagementEvents() {
           })
         });
         showToast("Día festivo guardado", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await loadFestivos();
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
       }
-    });
-
-    document.getElementById("btn-cargar-colombia")?.addEventListener("click", async () => {
-      try {
-        const anio = Number(document.getElementById("festivo-anio-col").value);
-        const res = await apiFetch("/api/festivos/cargar-colombia", {
-          method: "POST",
-          body: JSON.stringify({ anio })
-        });
-        showToast(`Se cargaron ${res.cantidad} festivos de Colombia (${res.anio})`, "success");
-        await loadFestivos();
-        renderApp();
-      } catch (err) {
-        showToast(err.message, "error");
-      }
-    });
-
-    document.querySelectorAll(".btn-del-festivo").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await apiFetch("/api/festivos/eliminar", {
-            method: "POST",
-            body: JSON.stringify({ fecha: btn.dataset.fecha })
-          });
-          showToast("Festivo eliminado", "info");
-          await loadFestivos();
-          renderApp();
-        } catch (err) {
-          showToast(err.message, "error");
-        }
-      });
     });
   }
 
@@ -3304,7 +3718,53 @@ function bindManagementEvents() {
     }
   });
 
-  // --- Eventos Base de Empleados (con Área) ---
+  // --- Eventos Base de Empleados (con Área, Filtros y Drawers) ---
+  document.getElementById("btn-open-new-emp")?.addEventListener("click", () => openDrawer("empleado", null));
+  document.getElementById("btn-open-import-emp")?.addEventListener("click", () => openDrawer("importar_empleados", null));
+
+  document.getElementById("filter-area-empleados")?.addEventListener("change", (e) => {
+    STATE.filtroAreaEmpleados = e.target.value;
+    renderApp();
+  });
+
+  document.getElementById("search-empleados-table")?.addEventListener("input", (e) => {
+    STATE.searchEmpleados = e.target.value;
+    renderApp();
+    const input = document.getElementById("search-empleados-table");
+    if (input) {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }
+  });
+
+  document.querySelectorAll(".btn-edit-emp").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      openDrawer("empleado", {
+        id_empleado: btn.dataset.id,
+        nombre: btn.dataset.nombre,
+        cargo: btn.dataset.cargo,
+        pin: btn.dataset.pin,
+        id_area: btn.dataset.area || ""
+      });
+    });
+  });
+
+  document.querySelectorAll(".btn-del-emp").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/empleados/eliminar", {
+          method: "POST",
+          body: JSON.stringify({ id_empleado: btn.dataset.id })
+        });
+        showToast("Empleado eliminado", "info");
+        await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
+
   const empDrop = document.getElementById("emp-dropzone");
   const empInput = document.getElementById("import-emp-excel");
   if (empDrop && empInput) {
@@ -3318,6 +3778,8 @@ function bindManagementEvents() {
           body: JSON.stringify({ filename: file.name, content_base64: b64, id_area_default })
         });
         showToast(`¡Se importaron ${res.importados} empleados en la Base de Datos!`, "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
         if (STATE.empleados.length > 0 && STATE.selectedEmployees.size === 0) {
           STATE.selectedEmployees.add(STATE.empleados[0].id_empleado);
@@ -3357,46 +3819,12 @@ function bindManagementEvents() {
           })
         });
         showToast("Empleado guardado con su Área", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
-      }
-    });
-
-    document.querySelectorAll(".btn-edit-emp").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        document.getElementById("emp-id").value = btn.dataset.id;
-        document.getElementById("emp-nombre").value = btn.dataset.nombre;
-        document.getElementById("emp-cargo").value = btn.dataset.cargo;
-        document.getElementById("emp-pin").value = btn.dataset.pin;
-        document.getElementById("emp-area").value = btn.dataset.area || "";
-      });
-    });
-
-    document.querySelectorAll(".btn-del-emp").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        try {
-          await apiFetch("/api/empleados/eliminar", {
-            method: "POST",
-            body: JSON.stringify({ id_empleado: btn.dataset.id })
-          });
-          showToast("Empleado eliminado", "info");
-          await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
-          renderApp();
-        } catch (err) {
-          showToast(err.message, "error");
-        }
-      });
-    });
-
-    document.getElementById("search-empleados-table")?.addEventListener("input", (e) => {
-      STATE.searchEmpleados = e.target.value;
-      renderApp();
-      const input = document.getElementById("search-empleados-table");
-      if (input) {
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
       }
     });
   }
@@ -3480,30 +3908,29 @@ function renderEmpleadoLayout() {
 
       <div class="main-area">
         <header class="topbar">
-          <div>
-            <div class="topbar-breadcrumb">PORTAL DEL COLABORADOR / ${STATE.user.nombre_area || "GENERAL"}</div>
-            <div class="topbar-title">${icon(currentNav.lucide, 20)} <span>${currentNav.label}</span></div>
+          <div class="topbar-left">
+            <div class="topbar-title">${icon(currentNav.lucide, 19)} <span>${currentNav.label}</span></div>
           </div>
-          <div style="display:flex; gap:8px; align-items:center;">
-            <button type="button" id="btn-emp-notifs" class="btn btn-outline btn-sm">
-              ${icon("bell", 16)} <span id="notif-bell-count" class="badge badge-danger" style="display:${
+          <div class="topbar-right">
+            <button type="button" id="btn-emp-notifs" class="icon-btn" title="Notificaciones">
+              ${icon("bell", 17)}
+              <span id="notif-bell-count" class="notif-dot" style="display:${
                 STATE.notificacionesNoLeidas > 0 ? "inline-flex" : "none"
               };">${STATE.notificacionesNoLeidas}</span>
             </button>
-            <button type="button" id="btn-emp-theme" class="btn btn-outline btn-sm">
-              ${STATE.darkMode ? icon("sun", 16) : icon("moon", 16)}
-            </button>
-            <button type="button" id="btn-emp-top-logout" class="btn btn-danger btn-sm">
-              ${icon("log-out", 15)} Salir
+            <button type="button" id="btn-emp-theme" class="icon-btn" title="${STATE.darkMode ? "Modo claro" : "Modo oscuro"}">
+              ${STATE.darkMode ? icon("sun", 17) : icon("moon", 17)}
             </button>
           </div>
         </header>
 
-        <main class="content-container" style="max-width:880px;">
+        <main class="content-container" style="max-width:960px;">
           ${renderNotificationsBanner()}
           ${renderEmpleadoViewContent()}
         </main>
       </div>
+
+      ${renderActiveDrawer()}
 
       <nav class="bottom-nav">
         ${EMP_NAV.map(
@@ -3848,45 +4275,22 @@ function renderEmpleadoViewContent() {
   }
 
   if (STATE.activeView === "emp_permisos") {
-    const today = new Date().toISOString().slice(0, 10);
     return `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">📝 Solicitar Permiso o Cambio de Turno (Enviado a Supervisor → Talento Humano)</div>
+      <div class="corp-toolbar">
+        <div class="corp-toolbar-left">
+          <span style="font-size:0.86rem; color:var(--texto-sec); font-weight:600;">
+            Mis Solicitudes de Permiso y Cambio de Turno (${r.solicitudes.length})
+          </span>
         </div>
-        <form id="form-emp-solicitud">
-          <div class="form-group">
-            <label class="form-label">Tipo de Solicitud</label>
-            <select id="sol-tipo" class="form-control">
-              <option value="PERMISO MÉDICO / PERSONAL">Permiso Médico / Personal</option>
-              <option value="CAMBIO DE TURNO">Cambio de Turno</option>
-              <option value="OLVIDO DE MARCACIÓN">Justificación de Marcación</option>
-              <option value="VACACIONES / LICENCIA">Vacaciones / Licencia</option>
-            </select>
-          </div>
-          <div class="grid-2">
-            <div class="form-group">
-              <label class="form-label">Desde Fecha</label>
-              <input type="date" id="sol-inicio" class="form-control" value="${today}" required />
-            </div>
-            <div class="form-group">
-              <label class="form-label">Hasta Fecha</label>
-              <input type="date" id="sol-fin" class="form-control" value="${today}" required />
-            </div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Motivo o Explicación</label>
-            <textarea id="sol-motivo" class="form-control" rows="3" placeholder="Describe tu solicitud (la revisará primero tu Supervisor de Área y luego Talento Humano)..." required></textarea>
-          </div>
-          <button type="submit" class="btn btn-action btn-block">📨 Enviar Solicitud a Mi Supervisor</button>
-        </form>
+        <div class="corp-toolbar-right">
+          <button type="button" id="btn-open-new-sol" class="btn btn-primary btn-sm">
+            ${icon("plus", 15)} Nueva Solicitud
+          </button>
+        </div>
       </div>
 
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">Mis Solicitudes Enviadas (${r.solicitudes.length})</div>
-        </div>
-        <div class="table-responsive">
+      <div class="corp-table-card">
+        <div class="table-responsive" style="max-height:calc(100vh - 210px);">
           <table>
             <thead>
               <tr>
@@ -3899,7 +4303,7 @@ function renderEmpleadoViewContent() {
             <tbody>
               ${
                 r.solicitudes.length === 0
-                  ? `<tr><td colspan="4" style="text-align:center; padding:18px;">No has enviado solicitudes todavía.</td></tr>`
+                  ? `<tr><td colspan="4" style="text-align:center; padding:28px; color:var(--texto-sec);">No has enviado solicitudes todavía. Pulsa "Nueva Solicitud".</td></tr>`
                   : r.solicitudes
                       .map(
                         (s) => `
@@ -4062,6 +4466,13 @@ function bindEmpleadoEvents() {
     });
   });
 
+  document.getElementById("btn-open-new-sol")?.addEventListener("click", () => openDrawer("emp_solicitud", null));
+  document.getElementById("btn-close-drawer")?.addEventListener("click", closeDrawer);
+  document.getElementById("btn-cancel-drawer")?.addEventListener("click", closeDrawer);
+  document.getElementById("drawer-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "drawer-backdrop") closeDrawer();
+  });
+
   const formSol = document.getElementById("form-emp-solicitud");
   if (formSol) {
     formSol.addEventListener("submit", async (e) => {
@@ -4078,6 +4489,8 @@ function bindEmpleadoEvents() {
           })
         });
         showToast("Solicitud enviada a tu Supervisor de Área", "success");
+        STATE.activeDrawer = null;
+        STATE.drawerData = null;
         await loadEmpleadoResumen();
         renderApp();
       } catch (err) {
