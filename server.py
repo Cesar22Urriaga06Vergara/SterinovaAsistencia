@@ -281,7 +281,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 detalle = _cargar_ultimo_detalle()
                 kpis = calcular_metricas(detalle)
                 solicitudes = DB.listar_solicitudes()
-                pendientes = sum(1 for s in solicitudes if s["estado"] == "PENDIENTE")
+                pendientes = sum(1 for s in solicitudes if s["estado"] in ("PENDIENTE", "PENDIENTE_SUPERVISOR", "AVALADO_SUPERVISOR"))
                 marcaciones_hoy = DB.listar_marcaciones_moviles(
                     fecha_inicio=date.today(), fecha_fin=date.today()
                 )
@@ -290,6 +290,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "total_empleados": resumen["total_empleados"],
                         "total_turnos": resumen["total_turnos"],
+                        "total_areas": len(DB.listar_areas()),
                         "ultima_fecha_asignada": ultima.isoformat() if ultima else None,
                         "alerta_requerida": alerta,
                         "mensaje_alerta": mensaje_alerta,
@@ -302,22 +303,30 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if path == "/api/areas":
+                self._json_response({"ok": True, "areas": DB.listar_areas()})
+                return
+
             if path == "/api/turnos":
-                turnos = DB.listar_turnos(incluir_inactivos=True)
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                turnos = DB.listar_turnos_detallado(id_area=id_area, incluir_globales=True)
                 self._json_response(
                     {
                         "ok": True,
                         "turnos": [
                             {
-                                "id": t.id,
-                                "nombre": t.nombre,
-                                "hora_entrada": t.hora_entrada,
-                                "hora_salida": t.hora_salida,
-                                "tolerancia_min": t.tolerancia_min,
-                                "descanso_min": t.descanso_min,
-                                "cruza_medianoche": t.cruza_medianoche,
-                                "recargo_nocturno_pct": t.recargo_nocturno_pct,
-                                "activo": t.activo,
+                                "id": t["id"],
+                                "nombre": t["nombre"],
+                                "hora_entrada": t["hora_entrada"],
+                                "hora_salida": t["hora_salida"],
+                                "tolerancia_min": t["tolerancia_min"],
+                                "descanso_min": t["descanso_min"],
+                                "cruza_medianoche": bool(t["cruza_medianoche"]),
+                                "recargo_nocturno_pct": t["recargo_nocturno_pct"],
+                                "activo": bool(t["activo"]),
+                                "id_area": t.get("id_area"),
+                                "nombre_area": t.get("nombre_area", "Global"),
                             }
                             for t in turnos
                         ],
@@ -339,7 +348,9 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/empleados":
-                empleados = DB.listar_empleados_detallado()
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                empleados = DB.listar_empleados_detallado(id_area=id_area)
                 self._json_response({"ok": True, "empleados": empleados})
                 return
 
@@ -400,6 +411,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
             if path == "/api/analisis":
                 id_empleado = query.get("id_empleado", [None])[0]
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
                 turno = query.get("turno", [None])[0]
                 f_ini_str = query.get("fecha_inicio", [None])[0]
                 f_fin_str = query.get("fecha_fin", [None])[0]
@@ -409,7 +422,10 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 f_fin = date.fromisoformat(f_fin_str) if f_fin_str else None
 
                 detalle = _obtener_detalle_activo(f_ini, f_fin)
-                nombres_por_id = dict(DB.listar_empleados())
+                empleados_det = DB.listar_empleados_detallado()
+                nombres_por_id = {str(e["id_empleado"]).strip(): e["nombre"] for e in empleados_det}
+                areas_por_id = {str(e["id_empleado"]).strip(): (e.get("id_area"), e.get("nombre_area", "Sin Área")) for e in empleados_det}
+
                 if detalle.empty:
                     self._json_response(
                         {
@@ -422,10 +438,14 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     )
                     return
 
+                if id_area is not None:
+                    ids_area = {str(e["id_empleado"]).strip() for e in empleados_det if e.get("id_area") == id_area}
+                    detalle = detalle.loc[detalle["id_empleado"].astype(str).str.strip().isin(ids_area)].copy()
+
                 turnos_disp = sorted(
                     str(v) for v in detalle.get("turno", pd.Series(dtype=object)).dropna().unique()
                 )
-                fechas_col = pd.to_datetime(detalle["fecha"], errors="coerce").dropna().dt.date
+                fechas_col = pd.to_datetime(detalle["fecha"], errors="coerce").dropna().dt.date if not detalle.empty else pd.Series(dtype=object)
                 rango = {
                     "inicio": min(fechas_col).isoformat() if not fechas_col.empty else "",
                     "fin": max(fechas_col).isoformat() if not fechas_col.empty else "",
@@ -441,10 +461,14 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 kpis = calcular_metricas(filtrado_base)
                 filtrado_final = filtrar_por_kpi(filtrado_base, kpi if kpi else None)
 
-                filas = [
-                    _serializar_fila_detalle(row.to_dict(), nombres_por_id)
-                    for _, row in filtrado_final.iterrows()
-                ]
+                filas = []
+                for _, row in filtrado_final.iterrows():
+                    s_row = _serializar_fila_detalle(row.to_dict(), nombres_por_id)
+                    emp_area_id, emp_area_nom = areas_por_id.get(s_row["id_empleado"], (None, "Sin Área"))
+                    s_row["id_area"] = emp_area_id
+                    s_row["nombre_area"] = emp_area_nom
+                    filas.append(s_row)
+
                 self._json_response(
                     {
                         "ok": True,
@@ -458,14 +482,41 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
             if path == "/api/marcaciones-moviles":
                 id_empleado = query.get("id_empleado", [None])[0]
-                marcaciones = DB.listar_marcaciones_moviles(id_empleado=id_empleado or None)
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                marcaciones = DB.listar_marcaciones_moviles(id_empleado=id_empleado or None, id_area=id_area)
                 self._json_response({"ok": True, "marcaciones": marcaciones})
                 return
 
             if path == "/api/solicitudes":
                 id_empleado = query.get("id_empleado", [None])[0]
-                solicitudes = DB.listar_solicitudes(id_empleado=id_empleado or None)
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                solicitudes = DB.listar_solicitudes(id_empleado=id_empleado or None, id_area=id_area)
                 self._json_response({"ok": True, "solicitudes": solicitudes})
+                return
+
+            if path == "/api/comunicados":
+                id_empleado = query.get("id_empleado", [None])[0]
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                comunicados = DB.listar_comunicados(id_empleado=id_empleado or None, id_area=id_area)
+                self._json_response({"ok": True, "comunicados": comunicados})
+                return
+
+            if path == "/api/notificaciones":
+                rol = query.get("rol", [""])[0]
+                user_id = query.get("user_id", [""])[0]
+                id_area_q = query.get("id_area", [None])[0]
+                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                notifs = DB.listar_notificaciones_para_usuario(rol, user_id, id_area=id_area)
+                self._json_response(
+                    {
+                        "ok": True,
+                        "notificaciones": notifs,
+                        "no_leidas": sum(1 for n in notifs if not n.get("leida")),
+                    }
+                )
                 return
 
             if path == "/api/usuarios":
@@ -531,11 +582,20 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 ]
                 marcaciones_moviles = DB.listar_marcaciones_moviles(id_empleado=id_empleado)
                 solicitudes = DB.listar_solicitudes(id_empleado=id_empleado)
+                emp_det = next(
+                    (e for e in DB.listar_empleados_detallado() if str(e["id_empleado"]).strip() == id_empleado),
+                    {},
+                )
+                id_area_emp = emp_det.get("id_area")
+                comunicados = DB.listar_comunicados(id_empleado=id_empleado, id_area=id_area_emp)
+                notificaciones = DB.listar_notificaciones_para_usuario("empleado", id_empleado, id_area=id_area_emp)
 
                 self._json_response(
                     {
                         "ok": True,
                         "hoy": hoy.isoformat(),
+                        "id_area": id_area_emp,
+                        "nombre_area": emp_det.get("nombre_area", "Sin Área"),
                         "turno_hoy": turno_hoy,
                         "proximos_turnos": proximos_turnos[:15],
                         "asignaciones": [
@@ -554,6 +614,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         "historial": historial,
                         "marcaciones_moviles": marcaciones_moviles[:20],
                         "solicitudes": solicitudes,
+                        "comunicados": comunicados,
+                        "notificaciones": notificaciones,
                     }
                 )
                 return
@@ -594,12 +656,28 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 self._json_response({"ok": True, "user": user})
                 return
 
+            if path == "/api/areas":
+                nombre = str(body.get("nombre", "")).strip()
+                descripcion = str(body.get("descripcion", "")).strip()
+                area_id = int(body["id"]) if body.get("id") else None
+                new_id = DB.guardar_area(nombre, descripcion, area_id=area_id)
+                self._json_response({"ok": True, "id": new_id})
+                return
+
+            if path == "/api/areas/eliminar":
+                area_id = int(body.get("id", 0))
+                DB.eliminar_area(area_id)
+                self._json_response({"ok": True})
+                return
+
             if path == "/api/usuarios":
                 username = str(body.get("username", "")).strip()
                 password = str(body.get("password", "")).strip()
                 nombre = str(body.get("nombre", "")).strip()
                 rol = str(body.get("rol", "admin")).strip().lower()
-                DB.guardar_usuario_sistema(username, password, nombre, rol)
+                id_area_raw = body.get("id_area")
+                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                DB.guardar_usuario_sistema(username, password, nombre, rol, id_area=id_area)
                 self._json_response({"ok": True})
                 return
 
@@ -616,6 +694,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 if not nombre or not hora_entrada or not hora_salida:
                     self._error_response("Nombre, hora de entrada y hora de salida son obligatorios.")
                     return
+                id_area_raw = body.get("id_area")
+                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
                 turno = Turno(
                     id=int(body["id"]) if body.get("id") else None,
                     nombre=nombre,
@@ -627,7 +707,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     recargo_nocturno_pct=float(body.get("recargo_nocturno_pct", 0) or 0),
                     activo=bool(body.get("activo", True)),
                 )
-                turno_id = DB.guardar_turno(turno)
+                turno_id = DB.guardar_turno_con_area(turno, id_area=id_area)
                 self._json_response({"ok": True, "id": turno_id})
                 return
 
@@ -662,10 +742,12 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 nombre = str(body.get("nombre", "")).strip()
                 cargo = str(body.get("cargo", "Operario")).strip()
                 pin = str(body.get("pin", "1234")).strip()
+                id_area_raw = body.get("id_area")
+                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
                 if not id_emp or not nombre:
                     self._error_response("ID y nombre del empleado son obligatorios.")
                     return
-                DB.guardar_empleado_individual(id_emp, nombre, cargo, pin)
+                DB.guardar_empleado_individual(id_emp, nombre, cargo, pin, id_area=id_area)
                 self._json_response({"ok": True})
                 return
 
@@ -676,31 +758,63 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/empleados/importar-excel":
-                 contenido_b64 = str(body.get("content_base64", ""))
-                 nombre_archivo = str(body.get("filename", "empleados.xlsx"))
-                 if not contenido_b64:
-                     self._error_response("Seleccione un archivo Excel válido.")
-                     return
-                 raw_bytes = base64.b64decode(contenido_b64.split(",")[-1])
-                 ruta_tmp = UPLOADS_DIR / f"emp_{datetime.now():%Y%m%d_%H%M%S}_{Path(nombre_archivo).name}"
-                 ruta_tmp.write_bytes(raw_bytes)
-                 df = normalizar_huellero(str(ruta_tmp))
-                 pares = []
-                 if not df.empty:
-                     for _, row in df[["id_empleado", "nombre"]].drop_duplicates().iterrows():
-                         if str(row["id_empleado"]).strip():
-                             pares.append((str(row["id_empleado"]).strip(), str(row["nombre"]).strip() or str(row["id_empleado"]).strip()))
-                 else:
-                     libro = pd.read_excel(ruta_tmp, header=None, dtype=object)
-                     for _, row in libro.iterrows():
-                         if len(row) >= 2 and pd.notna(row.iloc[0]) and pd.notna(row.iloc[1]):
-                             c0 = str(row.iloc[0]).strip().lstrip("'")
-                             c1 = str(row.iloc[1]).strip()
-                             if c0 and c0.lower() not in ("id", "id_empleado", "codigo"):
-                                 pares.append((c0, c1))
-                 guardados = DB.guardar_empleados(pares)
-                 self._json_response({"ok": True, "importados": guardados})
-                 return
+                contenido_b64 = str(body.get("content_base64", ""))
+                nombre_archivo = str(body.get("filename", "empleados.xlsx"))
+                id_area_def_raw = body.get("id_area_default")
+                id_area_def = int(id_area_def_raw) if id_area_def_raw and str(id_area_def_raw).isdigit() else None
+                if not contenido_b64:
+                    self._error_response("Seleccione un archivo Excel válido.")
+                    return
+                raw_bytes = base64.b64decode(contenido_b64.split(",")[-1])
+                ruta_tmp = UPLOADS_DIR / f"emp_{datetime.now():%Y%m%d_%H%M%S}_{Path(nombre_archivo).name}"
+                ruta_tmp.write_bytes(raw_bytes)
+                try:
+                    areas_por_nombre = {a["nombre"].strip().lower(): a["id"] for a in DB.listar_areas()}
+                    importados = 0
+                    libro = pd.read_excel(ruta_tmp, header=None, dtype=object)
+                    for _, row in libro.iterrows():
+                        if len(row) < 2 or pd.isna(row.iloc[0]) or pd.notna(row.iloc[2]) and str(row.iloc[0]).strip().lower() in ("id", "id_empleado", "codigo"):
+                            continue
+                        c0 = str(row.iloc[0]).strip().lstrip("'")
+                        c1 = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
+                        if not c0 or c0.lower() in ("id", "id_empleado", "codigo", "cedula"):
+                            continue
+                        # Si es archivo de huellero (col 2 es fecha), o si es base maestra (col 2 es Area, col 3 Cargo, col 4 PIN)
+                        area_row = id_area_def
+                        cargo_row = "Operario"
+                        pin_row = "1234"
+                        if len(row) >= 3 and pd.notna(row.iloc[2]):
+                            val2 = str(row.iloc[2]).strip()
+                            # Si val2 coincide con un área o no parece fecha, usarlo como Área
+                            if val2.lower() in areas_por_nombre:
+                                area_row = areas_por_nombre[val2.lower()]
+                            elif not any(ch.isdigit() for ch in val2) and len(val2) > 2:
+                                area_row = DB.guardar_area(val2, "Importada desde Excel")
+                                areas_por_nombre[val2.lower()] = area_row
+                        if len(row) >= 4 and pd.notna(row.iloc[3]):
+                            val3 = str(row.iloc[3]).strip()
+                            if not ":" in val3:
+                                cargo_row = val3
+                        if len(row) >= 5 and pd.notna(row.iloc[4]):
+                            pin_row = str(row.iloc[4]).strip()
+                        if c1:
+                            DB.guardar_empleado_individual(c0, c1, cargo_row, pin_row, id_area=area_row)
+                            importados += 1
+                    if importados == 0:
+                        df = normalizar_huellero(str(ruta_tmp))
+                        for _, row in df[["id_empleado", "nombre"]].drop_duplicates().iterrows():
+                            emp_id = str(row["id_empleado"]).strip()
+                            if emp_id:
+                                DB.guardar_empleado_individual(
+                                    emp_id,
+                                    str(row["nombre"]).strip() or emp_id,
+                                    id_area=id_area_def,
+                                )
+                                importados += 1
+                finally:
+                    ruta_tmp.unlink(missing_ok=True)
+                self._json_response({"ok": True, "importados": importados})
+                return
 
             if path == "/api/asignaciones/masivas":
                 empleados = [str(e).strip() for e in body.get("empleados", []) if str(e).strip()]
@@ -851,6 +965,9 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 turnos_seleccionados = body.get("turnos", [])
                 incluir_no_programados = bool(body.get("incluir_no_programados", False))
                 incluir_marcaciones_app = bool(body.get("incluir_marcaciones_app", True))
+                id_area_raw = body.get("id_area")
+                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                id_empleado_ind = str(body.get("id_empleado", "")).strip()
 
                 if fecha_inicio > fecha_fin:
                     self._error_response("La fecha inicial no puede ser posterior a la fecha final.")
@@ -859,7 +976,10 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     self._error_response("El período debe tener máximo 31 días para ajustarse a la hoja de turnos.")
                     return
 
-                empleados = DB.listar_empleados()
+                empleados_det = DB.listar_empleados_detallado(id_area=id_area)
+                if id_empleado_ind and id_empleado_ind != "TODOS":
+                    empleados_det = [e for e in empleados_det if str(e["id_empleado"]).strip() == id_empleado_ind]
+                empleados = [(str(e["id_empleado"]).strip(), e["nombre"]) for e in empleados_det]
                 ids_locales = {emp_id for emp_id, _ in empleados}
 
                 rutas_guardadas = []
@@ -883,7 +1003,6 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         ids_locales=ids_locales,
                     )
                 else:
-                    # Permite procesar solo con marcaciones de la app móvil o asignaciones existentes
                     marcaciones = pd.DataFrame(columns=["id_empleado", "nombre", "fecha", "hora", "fecha_hora"])
                     estadisticas = {
                         "total_archivo": 0,
@@ -896,9 +1015,11 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
                 if incluir_marcaciones_app:
                     marcaciones = _combinar_marcaciones_con_moviles(marcaciones, fecha_inicio, fecha_fin)
+                    if ids_locales and not marcaciones.empty:
+                        marcaciones = marcaciones.loc[marcaciones["id_empleado"].astype(str).str.strip().isin(ids_locales)].copy()
                     estadisticas["en_periodo"] = len(marcaciones)
 
-                todos_asignados = DB.listar_ids_empleados_con_asignacion(fecha_inicio, fecha_fin)
+                todos_asignados = DB.listar_ids_empleados_con_asignacion(fecha_inicio, fecha_fin) & ids_locales
                 todos_turnos = [t.nombre for t in DB.listar_turnos(incluir_inactivos=False)]
                 filtro_turno = (
                     None
@@ -907,7 +1028,9 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 )
                 ids_elegibles = DB.listar_ids_empleados_con_asignacion(
                     fecha_inicio, fecha_fin, filtro_turno
-                )
+                ) & ids_locales
+                if id_empleado_ind and id_empleado_ind != "TODOS":
+                    ids_elegibles = {id_empleado_ind}
 
                 detalle = comparar(
                     DB,
@@ -918,7 +1041,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 )
 
                 ids_marcados = set(marcaciones["id_empleado"].astype(str)) if not marcaciones.empty else set()
-                ids_no_programados = ids_marcados - todos_asignados
+                ids_no_programados = (ids_marcados - todos_asignados) & ids_locales
                 detalle_no_prog = pd.DataFrame()
                 if incluir_no_programados and ids_no_programados:
                     detalle_no_prog = comparar(
@@ -929,41 +1052,66 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         ids_empleados=ids_no_programados,
                     )
 
-                _guardar_ultimo_detalle(detalle)
+                # Combinar con el detalle global persistido para no perder otras áreas
+                detalle_previo = _cargar_ultimo_detalle()
+                if not detalle_previo.empty and not detalle.empty:
+                    procesados_ids = set(detalle["id_empleado"].astype(str).str.strip())
+                    resto = detalle_previo.loc[~detalle_previo["id_empleado"].astype(str).str.strip().isin(procesados_ids)].copy()
+                    _guardar_ultimo_detalle(pd.concat([resto, detalle], ignore_index=True))
+                elif not detalle.empty:
+                    _guardar_ultimo_detalle(detalle)
 
                 mes = date(fecha_inicio.year, fecha_inicio.month, 1)
                 archivos_generados = []
                 stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                sufijo = f"Emp_{id_empleado_ind}" if (id_empleado_ind and id_empleado_ind != "TODOS") else (f"Area_{id_area}" if id_area else "General")
 
                 if detalle is not None and not detalle.empty:
-                    nombre_comp = f"Comparativo_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
+                    nombre_comp = f"Comparativo_{sufijo}_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
                     exportar_comparativo(detalle, str(REPORTS_DIR / nombre_comp))
                     archivos_generados.append(
-                        {"tipo": "Comparativo General", "nombre": nombre_comp, "url": f"/api/reportes/descargar/{nombre_comp}"}
+                        {"tipo": f"Comparativo ({sufijo})", "nombre": nombre_comp, "url": f"/api/reportes/descargar/{nombre_comp}"}
                     )
 
-                    rutas_hojas = generar_hojas_turnos(
-                        DB,
-                        detalle,
-                        mes,
-                        salida=str(REPORTS_DIR),
-                        fecha_inicio=fecha_inicio,
-                        fecha_fin=fecha_fin,
-                    )
-                    for r in rutas_hojas:
-                        p = Path(r)
-                        archivos_generados.append(
-                            {"tipo": "Hojas de Turnos Corporativas", "nombre": p.name, "url": f"/api/reportes/descargar/{p.name}"}
+                    if id_empleado_ind and id_empleado_ind != "TODOS" and empleados:
+                        emp_nom = dict(empleados).get(id_empleado_ind, id_empleado_ind)
+                        nombre_ind = f"Hoja_Turnos_Individual_{id_empleado_ind}_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
+                        ruta_ind = generar_hoja_turnos(
+                            id_empleado_ind,
+                            emp_nom,
+                            mes,
+                            detalle,
+                            ruta_salida=str(REPORTS_DIR / nombre_ind),
+                            fecha_inicio=fecha_inicio,
+                            fecha_fin=fecha_fin,
                         )
+                        p_ind = Path(ruta_ind)
+                        archivos_generados.append(
+                            {"tipo": "Hoja de Turnos Individual", "nombre": p_ind.name, "url": f"/api/reportes/descargar/{p_ind.name}"}
+                        )
+                    else:
+                        rutas_hojas = generar_hojas_turnos(
+                            DB,
+                            detalle,
+                            mes,
+                            salida=str(REPORTS_DIR),
+                            fecha_inicio=fecha_inicio,
+                            fecha_fin=fecha_fin,
+                        )
+                        for r in rutas_hojas:
+                            p = Path(r)
+                            archivos_generados.append(
+                                {"tipo": "Hojas de Turnos Agrupadas", "nombre": p.name, "url": f"/api/reportes/descargar/{p.name}"}
+                            )
 
-                    nombre_nov = f"Novedades_6_Pestanas_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
+                    nombre_nov = f"Novedades_{sufijo}_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
                     exportar_reporte_novedades(detalle, str(REPORTS_DIR / nombre_nov))
                     archivos_generados.append(
                         {"tipo": "Reporte de Novedades (6 Pestañas)", "nombre": nombre_nov, "url": f"/api/reportes/descargar/{nombre_nov}"}
                     )
 
                 if incluir_no_programados and not detalle_no_prog.empty:
-                    nombre_aud = f"Auditoria_No_Programados_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
+                    nombre_aud = f"Auditoria_No_Programados_{sufijo}_{fecha_inicio:%Y%m%d}_{fecha_fin:%Y%m%d}_{stamp}.xlsx"
                     exportar_auditoria_no_programados(
                         detalle_no_prog,
                         str(REPORTS_DIR / nombre_aud),
@@ -1095,7 +1243,71 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 sol_id = int(body.get("id", 0))
                 estado = str(body.get("estado", "APROBADA")).strip()
                 respuesta = str(body.get("respuesta_admin", "")).strip()
-                DB.responder_solicitud(sol_id, estado, respuesta)
+                autor_rol = str(body.get("autor_rol", "supervisor")).strip()
+                autor_nombre = str(body.get("autor_nombre", "")).strip()
+                DB.responder_solicitud(sol_id, estado, respuesta, autor_rol=autor_rol, autor_nombre=autor_nombre)
+                self._json_response({"ok": True})
+                return
+
+            if path == "/api/exportar-permisos":
+                id_area_raw = body.get("id_area")
+                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                solicitudes = DB.listar_solicitudes(id_area=id_area)
+                if not solicitudes:
+                    self._error_response("No hay solicitudes de permisos para exportar.")
+                    return
+                df_perm = pd.DataFrame(solicitudes)
+                cols_orden = [
+                    "id", "creado_en", "id_empleado", "nombre_empleado", "nombre_area",
+                    "tipo", "fecha_inicio", "fecha_fin", "motivo", "estado",
+                    "supervisor_usuario", "respuesta_supervisor", "rrhh_usuario", "respuesta_admin"
+                ]
+                cols_final = [c for c in cols_orden if c in df_perm.columns]
+                nombre_arch = f"Reporte_Permisos_RRHH_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+                ruta_arch = REPORTS_DIR / nombre_arch
+                df_perm[cols_final].to_excel(ruta_arch, sheet_name="Permisos y Solicitudes", index=False, engine="openpyxl")
+                self._json_response(
+                    {
+                        "ok": True,
+                        "nombre": nombre_arch,
+                        "url": f"/api/reportes/descargar/{nombre_arch}",
+                    }
+                )
+                return
+
+            if path == "/api/comunicados":
+                titulo = str(body.get("titulo", "")).strip()
+                tipo = str(body.get("tipo", "MEMORANDO")).strip()
+                mensaje = str(body.get("mensaje", "")).strip()
+                destino_tipo = str(body.get("destino_tipo", "TODOS")).strip()
+                destino_valor = str(body.get("destino_valor", "")).strip()
+                fecha_evento = str(body.get("fecha_evento", "")).strip()
+                autor = str(body.get("autor", "Talento Humano")).strip()
+                if not titulo or not mensaje:
+                    self._error_response("El título y el mensaje del comunicado son obligatorios.")
+                    return
+                com_id = DB.crear_comunicado(
+                    titulo=titulo,
+                    tipo=tipo,
+                    mensaje=mensaje,
+                    destino_tipo=destino_tipo,
+                    destino_valor=destino_valor,
+                    fecha_evento=fecha_evento,
+                    autor=autor,
+                )
+                self._json_response({"ok": True, "id": com_id})
+                return
+
+            if path == "/api/comunicados/leer":
+                id_comunicado = int(body.get("id_comunicado", 0))
+                id_empleado = str(body.get("id_empleado", "")).strip()
+                DB.confirmar_lectura_comunicado(id_comunicado, id_empleado)
+                self._json_response({"ok": True})
+                return
+
+            if path == "/api/notificaciones/leer":
+                notif_id = int(body.get("id", 0))
+                DB.marcar_notificacion_leida(notif_id)
                 self._json_response({"ok": True})
                 return
 

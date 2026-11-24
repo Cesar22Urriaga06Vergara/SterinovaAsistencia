@@ -81,14 +81,65 @@ class Database:
                 fecha_inicio TEXT NOT NULL,
                 fecha_fin TEXT NOT NULL,
                 motivo TEXT NOT NULL,
-                estado TEXT NOT NULL DEFAULT 'PENDIENTE',
+                estado TEXT NOT NULL DEFAULT 'PENDIENTE_SUPERVISOR',
                 respuesta_admin TEXT DEFAULT '',
+                creado_en TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS areas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL UNIQUE,
+                descripcion TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS comunicados (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                titulo TEXT NOT NULL,
+                tipo TEXT NOT NULL DEFAULT 'MEMORANDO',
+                mensaje TEXT NOT NULL,
+                destino_tipo TEXT NOT NULL DEFAULT 'TODOS',
+                destino_valor TEXT DEFAULT '',
+                fecha_evento TEXT DEFAULT '',
+                autor TEXT NOT NULL DEFAULT 'Talento Humano',
+                creado_en TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS comunicados_lecturas (
+                id_comunicado INTEGER NOT NULL,
+                id_empleado TEXT NOT NULL,
+                leido_en TEXT NOT NULL,
+                PRIMARY KEY (id_comunicado, id_empleado)
+            );
+
+            CREATE TABLE IF NOT EXISTS notificaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                destino_rol TEXT DEFAULT '',
+                destino_id TEXT DEFAULT '',
+                id_area INTEGER,
+                titulo TEXT NOT NULL,
+                mensaje TEXT NOT NULL,
+                tipo TEXT DEFAULT 'INFO',
+                leida INTEGER NOT NULL DEFAULT 0,
                 creado_en TEXT NOT NULL
             );
 
             """
         )
-        # Asegurar columna pin en empleados para acceso móvil/web
+        # Semilla de áreas iniciales si no hay ninguna
+        total_areas = self.connection.execute("SELECT COUNT(*) AS c FROM areas").fetchone()["c"]
+        if total_areas == 0:
+            for nombre_area, desc_area in (
+                ("Producción", "Planta y líneas de producción"),
+                ("Calidad", "Control y aseguramiento de calidad"),
+                ("Conductores / Logística", "Transporte y distribución"),
+                ("Administrativos", "Personal administrativo y oficinas"),
+            ):
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO areas (nombre, descripcion) VALUES (?, ?)",
+                    (nombre_area, desc_area),
+                )
+
+        # Asegurar columnas en empleados (pin, cargo, id_area)
         columnas_emp = {
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(empleados)").fetchall()
@@ -97,6 +148,28 @@ class Database:
             self.connection.execute("ALTER TABLE empleados ADD COLUMN pin TEXT DEFAULT '1234'")
         if "cargo" not in columnas_emp:
             self.connection.execute("ALTER TABLE empleados ADD COLUMN cargo TEXT DEFAULT 'Operario'")
+        if "id_area" not in columnas_emp:
+            self.connection.execute("ALTER TABLE empleados ADD COLUMN id_area INTEGER DEFAULT NULL")
+
+        # Asegurar columna id_area en turnos
+        columnas_tur = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(turnos)").fetchall()
+        }
+        if "id_area" not in columnas_tur:
+            self.connection.execute("ALTER TABLE turnos ADD COLUMN id_area INTEGER DEFAULT NULL")
+
+        # Asegurar columnas adicionales en solicitudes_empleado para flujo 2 etapas
+        columnas_sol = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(solicitudes_empleado)").fetchall()
+        }
+        if "respuesta_supervisor" not in columnas_sol:
+            self.connection.execute("ALTER TABLE solicitudes_empleado ADD COLUMN respuesta_supervisor TEXT DEFAULT ''")
+        if "supervisor_usuario" not in columnas_sol:
+            self.connection.execute("ALTER TABLE solicitudes_empleado ADD COLUMN supervisor_usuario TEXT DEFAULT ''")
+        if "rrhh_usuario" not in columnas_sol:
+            self.connection.execute("ALTER TABLE solicitudes_empleado ADD COLUMN rrhh_usuario TEXT DEFAULT ''")
 
         # Asegurar columna foto_base64 en marcaciones_moviles
         columnas_marc = {
@@ -106,13 +179,15 @@ class Database:
         if "foto_base64" not in columnas_marc:
             self.connection.execute("ALTER TABLE marcaciones_moviles ADD COLUMN foto_base64 TEXT DEFAULT ''")
 
-        # Asegurar columna rol en usuarios_admin (soporta 'superadmin', 'admin' y 'supervisor')
+        # Asegurar columnas rol e id_area en usuarios_admin
         columnas_usr = {
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(usuarios_admin)").fetchall()
         }
         if "rol" not in columnas_usr:
             self.connection.execute("ALTER TABLE usuarios_admin ADD COLUMN rol TEXT DEFAULT 'admin'")
+        if "id_area" not in columnas_usr:
+            self.connection.execute("ALTER TABLE usuarios_admin ADD COLUMN id_area INTEGER DEFAULT NULL")
 
         # Leer credenciales iniciales del Superadmin desde .env o variables de entorno del deploy
         env_vars = {}
@@ -421,20 +496,59 @@ class Database:
         filas = self.connection.execute(consulta, parametros).fetchall()
         return {str(fila["id_empleado"]).strip() for fila in filas}
 
-    # --- Nuevos métodos para Web & App Móvil ---
+    # --- Nuevos métodos para Web & App Móvil (6 Roles, Áreas, Memorandos y Notificaciones) ---
+
+    def listar_areas(self) -> list[dict]:
+        rows = self.connection.execute(
+            """SELECT a.id, a.nombre, COALESCE(a.descripcion, '') AS descripcion,
+                      (SELECT COUNT(*) FROM empleados e WHERE e.id_area = a.id) AS total_empleados,
+                      (SELECT COUNT(*) FROM usuarios_admin u WHERE u.id_area = a.id AND u.rol = 'supervisor') AS total_supervisores
+               FROM areas a
+               ORDER BY a.nombre"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def guardar_area(self, nombre: str, descripcion: str = "", area_id: Optional[int] = None) -> int:
+        nom = nombre.strip()
+        if not nom:
+            raise ValueError("El nombre del área es obligatorio.")
+        with self.connection:
+            if area_id:
+                self.connection.execute(
+                    "UPDATE areas SET nombre=?, descripcion=? WHERE id=?",
+                    (nom, descripcion.strip(), int(area_id)),
+                )
+                return int(area_id)
+            cursor = self.connection.execute(
+                """INSERT INTO areas (nombre, descripcion)
+                   VALUES (?, ?)
+                   ON CONFLICT(nombre) DO UPDATE SET descripcion=excluded.descripcion""",
+                (nom, descripcion.strip()),
+            )
+            return int(cursor.lastrowid or 0)
+
+    def eliminar_area(self, area_id: int) -> None:
+        with self.connection:
+            self.connection.execute("UPDATE empleados SET id_area = NULL WHERE id_area = ?", (int(area_id),))
+            self.connection.execute("UPDATE usuarios_admin SET id_area = NULL WHERE id_area = ?", (int(area_id),))
+            self.connection.execute("UPDATE turnos SET id_area = NULL WHERE id_area = ?", (int(area_id),))
+            self.connection.execute("DELETE FROM areas WHERE id = ?", (int(area_id),))
 
     def autenticar_unificado(self, identificador: str, clave: str) -> Optional[dict]:
-        """Autentica automáticamente detectando si es Superadmin, Admin, Supervisor o Empleado."""
+        """Autentica automáticamente detectando cualquiera de los 6 roles:
+        superadmin, admin, supervisor, auditor, talento_humano o empleado."""
         ident = str(identificador).strip()
         pwd = str(clave).strip()
         if not ident or not pwd:
             return None
 
-        # 1. Buscar en tabla usuarios_admin (superadmin, admin, supervisor)
+        # 1. Buscar en tabla usuarios_admin
         row = self.connection.execute(
-            """SELECT username, nombre, COALESCE(rol, 'admin') AS rol
-               FROM usuarios_admin
-               WHERE lower(username) = lower(?) AND password_hash = ?""",
+            """SELECT u.username, u.nombre, COALESCE(u.rol, 'admin') AS rol,
+                      u.id_area, COALESCE(a.nombre, '') AS nombre_area
+               FROM usuarios_admin u
+               LEFT JOIN areas a ON a.id = u.id_area
+               WHERE lower(u.username) = lower(?) AND u.password_hash = ?""",
             (ident, pwd),
         ).fetchone()
         if row:
@@ -442,6 +556,8 @@ class Database:
                 "role": str(row["rol"] or "admin").strip().lower(),
                 "id": row["username"],
                 "nombre": row["nombre"],
+                "id_area": row["id_area"],
+                "nombre_area": row["nombre_area"] or "Todas las Áreas",
             }
 
         # 2. Buscar en tabla empleados (por ID o cédula + PIN)
@@ -449,19 +565,36 @@ class Database:
 
     def listar_usuarios_sistema(self) -> list[dict]:
         rows = self.connection.execute(
-            """SELECT username, nombre, COALESCE(rol, 'admin') AS rol
-               FROM usuarios_admin
-               ORDER BY CASE rol WHEN 'superadmin' THEN 1 WHEN 'admin' THEN 2 ELSE 3 END, username"""
+            """SELECT u.username, u.nombre, COALESCE(u.rol, 'admin') AS rol,
+                      u.id_area, COALESCE(a.nombre, 'Global / Todas las Áreas') AS nombre_area
+               FROM usuarios_admin u
+               LEFT JOIN areas a ON a.id = u.id_area
+               ORDER BY CASE u.rol
+                   WHEN 'superadmin' THEN 1
+                   WHEN 'admin' THEN 2
+                   WHEN 'auditor' THEN 3
+                   WHEN 'talento_humano' THEN 4
+                   ELSE 5 END, u.username"""
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def guardar_usuario_sistema(self, username: str, password: str, nombre: str, rol: str) -> None:
+    def guardar_usuario_sistema(
+        self,
+        username: str,
+        password: str,
+        nombre: str,
+        rol: str,
+        id_area: Optional[int] = None,
+    ) -> None:
         u = username.strip()
         r = rol.strip().lower()
-        if r not in ("superadmin", "admin", "supervisor"):
-            raise ValueError("El rol debe ser superadmin, admin o supervisor.")
+        roles_validos = ("superadmin", "admin", "supervisor", "auditor", "talento_humano")
+        if r not in roles_validos:
+            raise ValueError(f"El rol debe ser uno de: {', '.join(roles_validos)}")
         if not u or not nombre.strip():
             raise ValueError("El usuario y nombre son obligatorios.")
+        if r == "supervisor" and not id_area:
+            raise ValueError("Todo Supervisor debe estar asignado a un Área.")
         with self.connection:
             existente = self.connection.execute(
                 "SELECT password_hash FROM usuarios_admin WHERE username = ?",
@@ -471,13 +604,14 @@ class Database:
             if not pwd_final:
                 raise ValueError("Debe asignar una contraseña al usuario nuevo.")
             self.connection.execute(
-                """INSERT INTO usuarios_admin (username, password_hash, nombre, rol)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO usuarios_admin (username, password_hash, nombre, rol, id_area)
+                   VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(username) DO UPDATE SET
                    password_hash=excluded.password_hash,
                    nombre=excluded.nombre,
-                   rol=excluded.rol""",
-                (u, pwd_final, nombre.strip(), r),
+                   rol=excluded.rol,
+                   id_area=excluded.id_area""",
+                (u, pwd_final, nombre.strip(), r, int(id_area) if id_area else None),
             )
 
     def eliminar_usuario_sistema(self, username: str) -> None:
@@ -495,26 +629,17 @@ class Database:
             self.connection.execute("DELETE FROM usuarios_admin WHERE username = ?", (u,))
 
     def autenticar_admin(self, username: str, password: str, rol_esperado: Optional[str] = None) -> Optional[dict]:
-        row = self.connection.execute(
-            "SELECT username, nombre, COALESCE(rol, 'admin') AS rol FROM usuarios_admin WHERE username=? AND password_hash=?",
-            (username.strip(), password),
-        ).fetchone()
-        if row:
-            rol_real = str(row["rol"] or "admin").strip().lower()
-            if rol_esperado and rol_real != rol_esperado and rol_real != "admin":
-                return None
-            return {
-                "role": rol_esperado if (rol_esperado == "supervisor" and rol_real == "admin") else rol_real,
-                "id": row["username"],
-                "nombre": row["nombre"],
-            }
-        return None
+        return self.autenticar_unificado(username, password)
 
     def autenticar_empleado(self, id_empleado: str, pin: str) -> Optional[dict]:
         id_limpio = str(id_empleado).strip().lstrip("'")
-        # Buscar coincidencia exacta o sin ceros a la izquierda
         rows = self.connection.execute(
-            "SELECT id_empleado, nombre, COALESCE(pin, '1234') AS pin, COALESCE(cargo, 'Operario') AS cargo FROM empleados"
+            """SELECT e.id_empleado, e.nombre,
+                      COALESCE(e.pin, '1234') AS pin,
+                      COALESCE(e.cargo, 'Operario') AS cargo,
+                      e.id_area, COALESCE(a.nombre, 'Sin Área Asignada') AS nombre_area
+               FROM empleados e
+               LEFT JOIN areas a ON a.id = e.id_area"""
         ).fetchall()
         for row in rows:
             emp_id = str(row["id_empleado"]).strip()
@@ -527,34 +652,80 @@ class Database:
                         "id": emp_id,
                         "nombre": row["nombre"],
                         "cargo": row["cargo"],
+                        "id_area": row["id_area"],
+                        "nombre_area": row["nombre_area"],
                     }
         return None
 
-    def listar_empleados_detallado(self) -> list[dict]:
-        rows = self.connection.execute(
-            """SELECT id_empleado, nombre,
-                      COALESCE(pin, '1234') AS pin,
-                      COALESCE(cargo, 'Operario') AS cargo
-               FROM empleados ORDER BY id_empleado"""
-        ).fetchall()
+    def listar_empleados_detallado(self, id_area: Optional[int] = None) -> list[dict]:
+        query = """SELECT e.id_empleado, e.nombre,
+                          COALESCE(e.pin, '1234') AS pin,
+                          COALESCE(e.cargo, 'Operario') AS cargo,
+                          e.id_area, COALESCE(a.nombre, 'Sin Área') AS nombre_area
+                   FROM empleados e
+                   LEFT JOIN areas a ON a.id = e.id_area"""
+        params = []
+        if id_area is not None:
+            query += " WHERE e.id_area = ?"
+            params.append(int(id_area))
+        query += " ORDER BY e.id_empleado"
+        rows = self.connection.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
     def guardar_empleado_individual(
-        self, id_empleado: str, nombre: str, cargo: str = "Operario", pin: str = "1234"
+        self,
+        id_empleado: str,
+        nombre: str,
+        cargo: str = "Operario",
+        pin: str = "1234",
+        id_area: Optional[int] = None,
     ) -> None:
         id_limpio = str(id_empleado).strip().lstrip("'")
         with self.connection:
             self.connection.execute(
-                """INSERT INTO empleados (id_empleado, nombre, cargo, pin)
-                   VALUES (?, ?, ?, ?)
+                """INSERT INTO empleados (id_empleado, nombre, cargo, pin, id_area)
+                   VALUES (?, ?, ?, ?, ?)
                    ON CONFLICT(id_empleado) DO UPDATE SET
-                   nombre=excluded.nombre, cargo=excluded.cargo, pin=excluded.pin""",
-                (id_limpio, nombre.strip(), cargo.strip() or "Operario", pin.strip() or "1234"),
+                   nombre=excluded.nombre,
+                   cargo=excluded.cargo,
+                   pin=excluded.pin,
+                   id_area=COALESCE(excluded.id_area, empleados.id_area)""",
+                (
+                    id_limpio,
+                    nombre.strip(),
+                    cargo.strip() or "Operario",
+                    pin.strip() or "1234",
+                    int(id_area) if id_area else None,
+                ),
             )
 
     def eliminar_empleado(self, id_empleado: str) -> None:
         with self.connection:
             self.connection.execute("DELETE FROM empleados WHERE id_empleado=?", (id_empleado.strip(),))
+
+    def listar_turnos_detallado(self, id_area: Optional[int] = None, incluir_globales: bool = True) -> list[dict]:
+        query = """SELECT t.*, COALESCE(a.nombre, 'Global / Todas las Áreas') AS nombre_area
+                   FROM turnos t
+                   LEFT JOIN areas a ON a.id = t.id_area"""
+        params = []
+        if id_area is not None:
+            if incluir_globales:
+                query += " WHERE (t.id_area = ? OR t.id_area IS NULL)"
+            else:
+                query += " WHERE t.id_area = ?"
+            params.append(int(id_area))
+        query += " ORDER BY t.nombre"
+        rows = self.connection.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def guardar_turno_con_area(self, turno: Turno, id_area: Optional[int] = None) -> int:
+        turno_id = self.guardar_turno(turno)
+        with self.connection:
+            self.connection.execute(
+                "UPDATE turnos SET id_area = ? WHERE id = ?",
+                (int(id_area) if id_area else None, int(turno_id)),
+            )
+        return turno_id
 
     def registrar_marcacion_movil(
         self,
@@ -596,6 +767,7 @@ class Database:
         id_empleado: Optional[str] = None,
         fecha_inicio: Optional[date] = None,
         fecha_fin: Optional[date] = None,
+        id_area: Optional[int] = None,
     ) -> list[dict]:
         clauses = []
         params = []
@@ -608,16 +780,73 @@ class Database:
         if fecha_fin:
             clauses.append("substr(m.fecha_hora, 1, 10) <= ?")
             params.append(fecha_fin.isoformat())
+        if id_area is not None:
+            clauses.append("e.id_area = ?")
+            params.append(int(id_area))
 
-        query = """SELECT m.*, COALESCE(e.nombre, m.id_empleado) AS nombre_empleado
+        query = """SELECT m.*, COALESCE(e.nombre, m.id_empleado) AS nombre_empleado,
+                          e.id_area, COALESCE(a.nombre, 'Sin Área') AS nombre_area
                    FROM marcaciones_moviles m
-                   LEFT JOIN empleados e ON e.id_empleado = m.id_empleado"""
+                   LEFT JOIN empleados e ON e.id_empleado = m.id_empleado
+                   LEFT JOIN areas a ON a.id = e.id_area"""
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY m.fecha_hora DESC"
         rows = self.connection.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
+    # --- NOTIFICACIONES EN TIEMPO REAL ---
+    def crear_notificacion(
+        self,
+        titulo: str,
+        mensaje: str,
+        tipo: str = "INFO",
+        destino_rol: str = "",
+        destino_id: str = "",
+        id_area: Optional[int] = None,
+    ) -> int:
+        from datetime import datetime
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.connection:
+            cursor = self.connection.execute(
+                """INSERT INTO notificaciones
+                   (destino_rol, destino_id, id_area, titulo, mensaje, tipo, leida, creado_en)
+                   VALUES (?, ?, ?, ?, ?, ?, 0, ?)""",
+                (
+                    destino_rol.strip().lower(),
+                    str(destino_id).strip(),
+                    int(id_area) if id_area else None,
+                    titulo.strip(),
+                    mensaje.strip(),
+                    tipo.strip().upper(),
+                    ahora,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def listar_notificaciones_para_usuario(
+        self,
+        rol: str,
+        user_id: str,
+        id_area: Optional[int] = None,
+    ) -> list[dict]:
+        r = rol.strip().lower()
+        u = str(user_id).strip()
+        rows = self.connection.execute(
+            """SELECT * FROM notificaciones
+               WHERE (destino_id = ?)
+                  OR (destino_rol = ? AND (destino_id = '' OR destino_id IS NULL) AND (id_area IS NULL OR id_area = ?))
+                  OR (destino_rol = 'todos' AND (id_area IS NULL OR id_area = ?))
+               ORDER BY id DESC LIMIT 40""",
+            (u, r, int(id_area) if id_area else -1, int(id_area) if id_area else -1),
+        ).fetchall()
+        return [dict(x) for x in rows]
+
+    def marcar_notificacion_leida(self, notif_id: int) -> None:
+        with self.connection:
+            self.connection.execute("UPDATE notificaciones SET leida = 1 WHERE id = ?", (int(notif_id),))
+
+    # --- FLUJO DE SOLICITUDES Y PERMISOS (EMPLEADO -> SUPERVISOR -> TALENTO HUMANO) ---
     def crear_solicitud(
         self,
         id_empleado: str,
@@ -628,34 +857,226 @@ class Database:
     ) -> int:
         from datetime import datetime
         ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        emp_row = self.connection.execute(
+            "SELECT nombre, id_area FROM empleados WHERE id_empleado = ?",
+            (str(id_empleado).strip(),),
+        ).fetchone()
+        nombre_emp = emp_row["nombre"] if emp_row else id_empleado
+        id_area = emp_row["id_area"] if emp_row else None
+
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO solicitudes_empleado
                    (id_empleado, tipo, fecha_inicio, fecha_fin, motivo, estado, creado_en)
-                   VALUES (?, ?, ?, ?, ?, 'PENDIENTE', ?)""",
+                   VALUES (?, ?, ?, ?, ?, 'PENDIENTE_SUPERVISOR', ?)""",
                 (str(id_empleado).strip(), tipo.strip(), fecha_inicio, fecha_fin, motivo.strip(), ahora),
             )
-            return int(cursor.lastrowid)
+            sol_id = int(cursor.lastrowid)
 
-    def listar_solicitudes(self, id_empleado: Optional[str] = None) -> list[dict]:
-        query = """SELECT s.*, COALESCE(e.nombre, s.id_empleado) AS nombre_empleado
+        self.crear_notificacion(
+            titulo=f"Nueva solicitud de {nombre_emp}",
+            mensaje=f"{tipo} ({fecha_inicio} a {fecha_fin}): {motivo}",
+            tipo="PERMISO",
+            destino_rol="supervisor",
+            id_area=id_area,
+        )
+        return sol_id
+
+    def listar_solicitudes(
+        self,
+        id_empleado: Optional[str] = None,
+        id_area: Optional[int] = None,
+    ) -> list[dict]:
+        query = """SELECT s.*, COALESCE(e.nombre, s.id_empleado) AS nombre_empleado,
+                          e.id_area, COALESCE(a.nombre, 'Sin Área') AS nombre_area
                    FROM solicitudes_empleado s
-                   LEFT JOIN empleados e ON e.id_empleado = s.id_empleado"""
+                   LEFT JOIN empleados e ON e.id_empleado = s.id_empleado
+                   LEFT JOIN areas a ON a.id = e.id_area"""
+        clauses = []
         params = []
         if id_empleado:
-            query += " WHERE s.id_empleado = ?"
+            clauses.append("s.id_empleado = ?")
             params.append(str(id_empleado).strip())
+        if id_area is not None:
+            clauses.append("e.id_area = ?")
+            params.append(int(id_area))
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY s.creado_en DESC"
         rows = self.connection.execute(query, params).fetchall()
         return [dict(r) for r in rows]
 
-    def responder_solicitud(self, solicitud_id: int, estado: str, respuesta_admin: str = "") -> None:
+    def responder_solicitud(
+        self,
+        solicitud_id: int,
+        estado: str,
+        respuesta: str = "",
+        autor_rol: str = "supervisor",
+        autor_nombre: str = "",
+    ) -> None:
+        sol = self.connection.execute(
+            """SELECT s.*, COALESCE(e.nombre, s.id_empleado) AS nombre_empleado
+               FROM solicitudes_empleado s
+               LEFT JOIN empleados e ON e.id_empleado = s.id_empleado
+               WHERE s.id = ?""",
+            (int(solicitud_id),),
+        ).fetchone()
+        if not sol:
+            raise ValueError("Solicitud no encontrada.")
+
+        est = estado.upper().strip()
+        rol_limpio = autor_rol.strip().lower()
+
+        with self.connection:
+            if rol_limpio == "supervisor":
+                # El supervisor avala (pasa a Talento Humano) o rechaza
+                nuevo_estado = "AVALADO_SUPERVISOR" if est in ("AVALADO_SUPERVISOR", "APROBADA") else "RECHAZADA_SUPERVISOR"
+                self.connection.execute(
+                    """UPDATE solicitudes_empleado
+                       SET estado = ?, respuesta_supervisor = ?, supervisor_usuario = ?
+                       WHERE id = ?""",
+                    (nuevo_estado, respuesta.strip(), autor_nombre, int(solicitud_id)),
+                )
+            else:
+                # Talento Humano o Superadmin da la aprobación/rechazo final
+                nuevo_estado = "APROBADA" if est == "APROBADA" else "RECHAZADA"
+                self.connection.execute(
+                    """UPDATE solicitudes_empleado
+                       SET estado = ?, respuesta_admin = ?, rrhh_usuario = ?
+                       WHERE id = ?""",
+                    (nuevo_estado, respuesta.strip(), autor_nombre, int(solicitud_id)),
+                )
+
+        if nuevo_estado == "AVALADO_SUPERVISOR":
+            self.crear_notificacion(
+                titulo=f"Permiso Avalado por Supervisor ({sol['nombre_empleado']})",
+                mensaje=f"Pendiente aprobación final de Talento Humano: {sol['tipo']} ({sol['fecha_inicio']} a {sol['fecha_fin']})",
+                tipo="RRHH",
+                destino_rol="talento_humano",
+            )
+            self.crear_notificacion(
+                titulo="Tu Supervisor avaló tu solicitud",
+                mensaje=f"Tu solicitud de {sol['tipo']} pasó a Talento Humano para aprobación final.",
+                tipo="INFO",
+                destino_id=sol["id_empleado"],
+            )
+        else:
+            self.crear_notificacion(
+                titulo=f"Respuesta a tu solicitud ({nuevo_estado})",
+                mensaje=f"{sol['tipo']} ({sol['fecha_inicio']}): {respuesta or nuevo_estado}",
+                tipo="PERMISO",
+                destino_id=sol["id_empleado"],
+            )
+
+    # --- MEMORANDOS, CITACIONES A CAPACITACIÓN Y COMUNICADOS (TALENTO HUMANO) ---
+    def crear_comunicado(
+        self,
+        titulo: str,
+        tipo: str,
+        mensaje: str,
+        destino_tipo: str = "TODOS",
+        destino_valor: str = "",
+        fecha_evento: str = "",
+        autor: str = "Talento Humano",
+    ) -> int:
+        from datetime import datetime
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        dt_tipo = destino_tipo.strip().upper()  # 'TODOS' | 'AREA' | 'EMPLEADO'
+        dt_val = str(destino_valor).strip()
+
+        with self.connection:
+            cursor = self.connection.execute(
+                """INSERT INTO comunicados
+                   (titulo, tipo, mensaje, destino_tipo, destino_valor, fecha_evento, autor, creado_en)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    titulo.strip(),
+                    tipo.strip().upper(),
+                    mensaje.strip(),
+                    dt_tipo,
+                    dt_val,
+                    fecha_evento.strip(),
+                    autor.strip(),
+                    ahora,
+                ),
+            )
+            com_id = int(cursor.lastrowid)
+
+        # Disparar notificación en tiempo real según destinatario
+        if dt_tipo == "EMPLEADO" and dt_val:
+            self.crear_notificacion(
+                titulo=f"📢 {tipo}: {titulo}",
+                mensaje=mensaje,
+                tipo="MEMORANDO",
+                destino_id=dt_val,
+            )
+        elif dt_tipo == "AREA" and dt_val.isdigit():
+            self.crear_notificacion(
+                titulo=f"📢 {tipo} de Área: {titulo}",
+                mensaje=mensaje,
+                tipo="MEMORANDO",
+                destino_rol="todos",
+                id_area=int(dt_val),
+            )
+        else:
+            self.crear_notificacion(
+                titulo=f"📢 {tipo} General: {titulo}",
+                mensaje=mensaje,
+                tipo="MEMORANDO",
+                destino_rol="todos",
+            )
+        return com_id
+
+    def listar_comunicados(
+        self,
+        id_empleado: Optional[str] = None,
+        id_area: Optional[int] = None,
+    ) -> list[dict]:
+        rows = self.connection.execute(
+            """SELECT c.*,
+                      (SELECT COUNT(*) FROM comunicados_lecturas cl WHERE cl.id_comunicado = c.id) AS total_lecturas
+               FROM comunicados c
+               ORDER BY c.id DESC"""
+        ).fetchall()
+        areas_map = {str(a["id"]): a["nombre"] for a in self.listar_areas()}
+        emps_map = dict(self.listar_empleados())
+
+        lecturas_emp = set()
+        if id_empleado:
+            l_rows = self.connection.execute(
+                "SELECT id_comunicado FROM comunicados_lecturas WHERE id_empleado = ?",
+                (str(id_empleado).strip(),),
+            ).fetchall()
+            lecturas_emp = {r["id_comunicado"] for r in l_rows}
+
+        resultado = []
+        for r in rows:
+            item = dict(r)
+            dt_tipo = item["destino_tipo"]
+            dt_val = str(item["destino_valor"] or "")
+            if id_empleado:
+                if dt_tipo == "EMPLEADO" and dt_val != str(id_empleado).strip():
+                    continue
+                if dt_tipo == "AREA" and str(id_area or "") != dt_val:
+                    continue
+            if dt_tipo == "TODOS":
+                item["destino_etiqueta"] = "Toda la Empresa"
+            elif dt_tipo == "AREA":
+                item["destino_etiqueta"] = f"Área: {areas_map.get(dt_val, dt_val)}"
+            else:
+                item["destino_etiqueta"] = f"Empleado: {emps_map.get(dt_val, dt_val)}"
+            item["leido_por_mi"] = item["id"] in lecturas_emp
+            resultado.append(item)
+        return resultado
+
+    def confirmar_lectura_comunicado(self, id_comunicado: int, id_empleado: str) -> None:
+        from datetime import datetime
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self.connection:
             self.connection.execute(
-                """UPDATE solicitudes_empleado
-                   SET estado = ?, respuesta_admin = ?
-                   WHERE id = ?""",
-                (estado.upper().strip(), respuesta_admin.strip(), solicitud_id),
+                """INSERT OR REPLACE INTO comunicados_lecturas (id_comunicado, id_empleado, leido_en)
+                   VALUES (?, ?, ?)""",
+                (int(id_comunicado), str(id_empleado).strip(), ahora),
             )
 
     def close(self) -> None:

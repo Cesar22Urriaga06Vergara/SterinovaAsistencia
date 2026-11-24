@@ -1,14 +1,23 @@
 /* =========================================================================
    STERINOVA - Plataforma Inteligente Web & App Móvil de Asistencia y Nómina
-   Edición Mejorada Premium:
-   - Login Unificado con detección automática de Rol (Superadmin, Admin, Supervisor, Empleado)
-   - Modo Oscuro / Claro persistente + Glassmorphism
-   - Gráficas interactivas Chart.js (Horas Extra, Recargos ED/EN/EF/END/RN/RND/RF, Estados)
-   - Mapa interactivo en vivo (Leaflet/OpenStreetMap) con pines de marcaciones GPS + Dirección
-   - Calendario Individual/Grupal + Matriz Gantt Semanal/Mensual con colores por turno
-   - Zona Drag & Drop para Excel del Huellero con vista previa instantánea antes de liquidar
-   - Vista Previa en pantalla de la Hoja de Turnos Corporativa + Impresión / Exportación PDF
-   - Cámara Selfie opcional y nota rápida al marcar Entrada/Salida GPS desde el celular
+   Arquitectura Corporativa de 6 Roles + Áreas + Notificaciones en Tiempo Real:
+   1) SUPERADMIN: Crea/edita Áreas, Usuarios (Supervisores ligados a su Área,
+      Admin General, Auditor de Horas Extras, Talento Humano), Base de Empleados.
+   2) SUPERVISOR (ligado a su Área): Crea/edita/elimina Turnos de su Área,
+      asigna turnos en Calendario/Gantt, valida horas extras con el Huellero,
+      genera reportes Individuales o Agrupados de sus empleados y avala permisos.
+   3) AUDITOR DE HORAS EXTRAS: Ve todos los reportes y métricas de horas extras
+      de todas las áreas y también puede procesar el Huellero y generar reportes
+      individuales o por área si aún no están hechos.
+   4) TALENTO HUMANO (RRHH): Gestión y aprobación final de permisos, exportación
+      de Reporte Excel de Permisos, envío de Memorandos/Capacitaciones con
+      notificaciones en tiempo real y confirmación de lectura, y validación de
+      huellero de Administrativos o de cualquier Área.
+   5) ADMIN GENERAL: Consulta y auditoría ejecutiva global (ve todas las Áreas,
+      Supervisores, Empleados, Métricas, Gráficas, Mapa GPS y Reportes).
+   6) EMPLEADO: Reloj GPS con Dirección Física + Coordenadas + Selfie, Buzón de
+      Memorandos/Capacitaciones con confirmación de "Enterado", Mis Turnos,
+      Mis Horas Extra y Solicitud de Permisos.
    ========================================================================= */
 
 const SHIFT_COLORS = [
@@ -18,11 +27,17 @@ const SHIFT_COLORS = [
 
 const STATE = {
   user: JSON.parse(localStorage.getItem("sterinova_user") || "null"),
-  darkMode: localStorage.getItem("sterinova_dark") === "true",
+  darkMode: localStorage.getItem("sterinova_dark") === "true",`r`n  loginMode: "corporativo", // "corporativo" | "colaborador"
   activeView: "dashboard",
   deferredInstallPrompt: null,
+  // Notificaciones en tiempo real
+  notificaciones: [],
+  notificacionesNoLeidas: 0,
+  knownNotifIds: new Set(),
+  showNotifModal: false,
   // Datos compartidos
   dashboard: null,
+  areas: [],
   usuarios: [],
   turnos: [],
   festivos: [],
@@ -30,18 +45,21 @@ const STATE = {
   asignaciones: [],
   reportes: [],
   solicitudes: [],
+  comunicados: [],
   marcacionesMoviles: [],
-  // Asignación de Turnos (Paso 3)
+  // Asignación de Turnos
   calMonth: new Date().toISOString().slice(0, 7),
-  asignacionModoVista: "calendario", // 'calendario' | 'matriz'
+  asignacionModoVista: "calendario",
   selectedEmployees: new Set(),
   selectedDates: new Set(),
   searchEmpAsignacion: "",
-  // Procesar Huellero Drag & Drop (Paso 4)
+  // Procesar Huellero (Individual o Agrupado por Área)
   huelleroFiles: [],
   huelleroPreview: null,
-  // Análisis, Gráficas y Hoja Imprimible (Paso 5)
-  analisisTab: "tabla", // 'tabla' | 'hoja_imprimible'
+  huelleroFiltroArea: "",
+  huelleroFiltroEmpleado: "TODOS",
+  // Análisis y Hoja Imprimible
+  analisisTab: "tabla",
   hojaEmpleadoId: "",
   analisisData: {
     kpis: { horas_extra: 0, minutos_tardanza: 0, ausencias: 0, llegadas_tempranas: 0 },
@@ -50,31 +68,44 @@ const STATE = {
     rango_fechas: { inicio: "", fin: "" }
   },
   analisisFiltros: {
+    id_area: "",
     id_empleado: "TODOS",
     turno: "TODOS",
     fecha_inicio: "",
     fecha_fin: "",
     kpi: ""
   },
-  // Portal Empleado + Cámara Selfie
+  // Estado Portal Empleado + Cámara Selfie
   empResumen: null,
   gpsActual: null,
   cameraStream: null,
   selfieBase64: "",
-  notaMarcacion: ""
+  notaMarcacion: "",
+  // Buscadores en tiempo real de tablas
+  searchUsuarios: "",
+  searchEmpleados: "",
+  searchTurnos: "",
+  // Estado UI del Login Corporativo
+  showPassword: false
 };
 
-// Instancias activas de Chart.js y Leaflet
+function icon(name, size = 18) {
+  return `<i data-lucide="${name}" style="width:${size}px; height:${size}px;"></i>`;
+}
+
+function refreshLucideIcons() {
+  if (typeof lucide !== "undefined" && lucide.createIcons) {
+    lucide.createIcons();
+  }
+}
+
 let chartRecargosInstance = null;
 let chartEstadosInstance = null;
 let leafletMapInstance = null;
 
 function applyTheme() {
-  if (STATE.darkMode) {
-    document.body.classList.add("dark-mode");
-  } else {
-    document.body.classList.remove("dark-mode");
-  }
+  if (STATE.darkMode) document.body.classList.add("dark-mode");
+  else document.body.classList.remove("dark-mode");
 }
 
 function toggleDarkMode() {
@@ -88,6 +119,15 @@ function getShiftColor(idTurno, esDescanso = false) {
   if (esDescanso) return "#10B981";
   if (!idTurno) return "#64748B";
   return SHIFT_COLORS[Number(idTurno) % SHIFT_COLORS.length];
+}
+
+// Si el usuario es Supervisor, está restringido estrictamente a su Área asignada
+function getEffectiveAreaId() {
+  if (!STATE.user) return null;
+  if (STATE.user.role === "supervisor") {
+    return STATE.user.id_area || null;
+  }
+  return null;
 }
 
 window.addEventListener("beforeinstallprompt", (e) => {
@@ -111,7 +151,7 @@ function showToast(msg, type = "info") {
   if (type === "success") el.style.borderLeftColor = "#10B981";
   el.textContent = msg;
   container.appendChild(el);
-  setTimeout(() => el.remove(), 4000);
+  setTimeout(() => el.remove(), 4200);
 }
 
 async function apiFetch(url, options = {}) {
@@ -145,12 +185,23 @@ function stopCameraStream() {
 function setUser(user) {
   stopCameraStream();
   STATE.user = user;
+  STATE.knownNotifIds.clear();
   if (user) {
     localStorage.setItem("sterinova_user", JSON.stringify(user));
-    if (user.role === "superadmin") STATE.activeView = "usuarios";
+    if (user.role === "superadmin") STATE.activeView = "areas_usuarios";
     else if (user.role === "admin") STATE.activeView = "dashboard";
-    else if (user.role === "supervisor") STATE.activeView = "asignacion";
+    else if (user.role === "supervisor") STATE.activeView = "turnos";
+    else if (user.role === "auditor") STATE.activeView = "analisis";
+    else if (user.role === "talento_humano") STATE.activeView = "rrhh_comunicados";
     else STATE.activeView = "emp_reloj";
+
+    if (user.role === "supervisor" && user.id_area) {
+      STATE.huelleroFiltroArea = String(user.id_area);
+      STATE.analisisFiltros.id_area = String(user.id_area);
+    } else {
+      STATE.huelleroFiltroArea = "";
+      STATE.analisisFiltros.id_area = "";
+    }
     initRoleData();
   } else {
     localStorage.removeItem("sterinova_user");
@@ -165,18 +216,21 @@ async function initRoleData() {
       renderApp();
       return;
     }
+    await loadNotificaciones(false);
     const role = STATE.user.role;
-    if (role === "superadmin" || role === "admin" || role === "supervisor") {
+    if (role !== "empleado") {
       const promises = [
         loadDashboard(),
+        loadAreas(),
         loadTurnos(),
         loadFestivos(),
         loadEmpleados(),
         loadSolicitudes(),
+        loadComunicados(),
         loadReportes(),
         loadMarcacionesMoviles()
       ];
-      if (role === "superadmin") {
+      if (role === "superadmin" || role === "admin") {
         promises.push(loadUsuarios());
       }
       await Promise.all(promises);
@@ -199,24 +253,85 @@ async function initRoleData() {
   }
 }
 
+async function loadNotificaciones(notifyNew = true) {
+  if (!STATE.user) return;
+  try {
+    const params = new URLSearchParams({
+      rol: STATE.user.role,
+      user_id: STATE.user.id
+    });
+    if (STATE.user.id_area) params.set("id_area", String(STATE.user.id_area));
+    const r = await apiFetch(`/api/notificaciones?${params.toString()}`);
+    const list = r.notificaciones || [];
+    if (notifyNew && STATE.knownNotifIds.size > 0) {
+      list.forEach((n) => {
+        if (!STATE.knownNotifIds.has(n.id) && !n.leida) {
+          showToast(`🔔 ${n.titulo}: ${n.mensaje}`, "info");
+        }
+      });
+    }
+    list.forEach((n) => STATE.knownNotifIds.add(n.id));
+    STATE.notificaciones = list;
+    STATE.notificacionesNoLeidas = r.no_leidas || 0;
+    const badgeEl = document.getElementById("notif-bell-count");
+    if (badgeEl) {
+      badgeEl.textContent = String(STATE.notificacionesNoLeidas);
+      badgeEl.style.display = STATE.notificacionesNoLeidas > 0 ? "inline-flex" : "none";
+    }
+  } catch {}
+}
+
+// Polling en tiempo real cada 8 segundos para notificaciones y memorandos
+setInterval(() => {
+  if (STATE.user) {
+    loadNotificaciones(true);
+  }
+}, 8000);
+
 async function loadDashboard() { STATE.dashboard = await apiFetch("/api/dashboard"); }
+async function loadAreas() { const r = await apiFetch("/api/areas"); STATE.areas = r.areas || []; }
 async function loadUsuarios() { const r = await apiFetch("/api/usuarios"); STATE.usuarios = r.usuarios || []; }
-async function loadTurnos() { const r = await apiFetch("/api/turnos"); STATE.turnos = r.turnos || []; }
+async function loadTurnos() {
+  const areaId = getEffectiveAreaId();
+  const url = areaId ? `/api/turnos?id_area=${areaId}` : "/api/turnos";
+  const r = await apiFetch(url);
+  STATE.turnos = r.turnos || [];
+}
 async function loadFestivos() { const r = await apiFetch("/api/festivos"); STATE.festivos = r.festivos || []; }
-async function loadEmpleados() { const r = await apiFetch("/api/empleados"); STATE.empleados = r.empleados || []; }
+async function loadEmpleados() {
+  const areaId = getEffectiveAreaId();
+  const url = areaId ? `/api/empleados?id_area=${areaId}` : "/api/empleados";
+  const r = await apiFetch(url);
+  STATE.empleados = r.empleados || [];
+}
 async function loadAsignaciones() {
   const r = await apiFetch(`/api/asignaciones?mes=${encodeURIComponent(STATE.calMonth)}`);
-  STATE.asignaciones = r.asignaciones || [];
+  const empIds = new Set(STATE.empleados.map((e) => e.id_empleado));
+  const areaId = getEffectiveAreaId();
+  STATE.asignaciones = (r.asignaciones || []).filter((a) => !areaId || empIds.has(a.id_empleado));
 }
 async function loadReportes() { const r = await apiFetch("/api/reportes"); STATE.reportes = r.reportes || []; }
-async function loadSolicitudes() { const r = await apiFetch("/api/solicitudes"); STATE.solicitudes = r.solicitudes || []; }
+async function loadSolicitudes() {
+  const areaId = getEffectiveAreaId();
+  const url = areaId ? `/api/solicitudes?id_area=${areaId}` : "/api/solicitudes";
+  const r = await apiFetch(url);
+  STATE.solicitudes = r.solicitudes || [];
+}
+async function loadComunicados() {
+  const r = await apiFetch("/api/comunicados");
+  STATE.comunicados = r.comunicados || [];
+}
 async function loadMarcacionesMoviles() {
-  const r = await apiFetch("/api/marcaciones-moviles");
+  const areaId = getEffectiveAreaId();
+  const url = areaId ? `/api/marcaciones-moviles?id_area=${areaId}` : "/api/marcaciones-moviles";
+  const r = await apiFetch(url);
   STATE.marcacionesMoviles = r.marcaciones || [];
 }
 async function loadAnalisis() {
   const f = STATE.analisisFiltros;
   const params = new URLSearchParams();
+  const effectiveArea = getEffectiveAreaId() || f.id_area;
+  if (effectiveArea && effectiveArea !== "TODAS") params.set("id_area", String(effectiveArea));
   if (f.id_empleado && f.id_empleado !== "TODOS") params.set("id_empleado", f.id_empleado);
   if (f.turno && f.turno !== "TODOS") params.set("turno", f.turno);
   if (f.fecha_inicio) params.set("fecha_inicio", f.fecha_inicio);
@@ -290,16 +405,18 @@ function renderApp() {
   if (!STATE.user) {
     root.innerHTML = renderLoginScreen();
     bindLoginEvents();
+    refreshLucideIcons();
     return;
   }
 
   if (STATE.user.role === "empleado") {
     root.innerHTML = renderEmpleadoLayout();
     bindEmpleadoEvents();
+    refreshLucideIcons();
   } else {
     root.innerHTML = renderManagementLayout();
     bindManagementEvents();
-    // Inicializar gráficas o mapas si la vista activa los contiene
+    refreshLucideIcons();
     setTimeout(() => {
       if (STATE.activeView === "analisis" || STATE.activeView === "dashboard") {
         initAnalisisCharts();
@@ -312,73 +429,136 @@ function renderApp() {
 }
 
 // ============================================================================
-// LOGIN UNIFICADO INTELIGENTE
+// LOGIN CORPORATIVO ENTERPRISE SPLIT-SCREEN (6 ROLES)
 // ============================================================================
 
-function renderLoginScreen() {
+function renderLoginScreen() {`r`n  const isColab = STATE.loginMode === "colaborador";
   return `
     <div class="login-wrapper">
-      <div class="login-card">
-        <div style="display:flex; justify-content:flex-end; margin-bottom:8px;">
+      <div class="login-hero">
+        <div class="login-hero-top">
+          <div class="login-hero-badge">
+            ${icon("shield-check", 15)}
+            <span>PLATAFORMA CORPORATIVA</span>
+          </div>
+        </div>
+
+        <div class="login-hero-content">
+          <h1>Aseguramiento en esterilización</h1>
+          <p>Nuestro equipo, comprometido con la excelencia en cada servicio.</p>
+        </div>
+        <div class="login-hero-footer">
+          <span>© ${new Date().getFullYear()} Sterinova</span>
+          <span style="display:inline-flex; align-items:center; gap:6px;">
+            ${icon("lock", 14)} Conexión segura
+          </span>
+        </div>
+      </div>
+
+      <div class="login-panel">
+        <div class="login-panel-topbar">
           <button type="button" id="btn-theme-login" class="btn btn-outline btn-sm">
-            ${STATE.darkMode ? "☀️ Modo Claro" : "🌙 Modo Oscuro"}
+            ${STATE.darkMode ? `${icon("sun", 15)} Modo Claro` : `${icon("moon", 15)} Modo Oscuro`}
           </button>
         </div>
-        <img src="/api/branding/logo" alt="Sterinova" class="login-logo" onerror="this.style.display='none'" />
-        <div class="login-title">Sistema de Control de Asistencia</div>
-        <div class="login-subtitle">Plataforma Inteligente Web & App Móvil</div>
 
-        <form id="form-login-unificado">
-          <div class="form-group">
-            <label class="form-label">Usuario o ID de Empleado / Cédula</label>
-            <input
-              type="text"
-              id="login-identificador"
-              class="form-control"
-              placeholder="Ingrese su usuario o código de empleado"
-              autocomplete="username"
-              required
-            />
+        <div class="login-card">
+          <div class="login-brand-box">
+            <img src="/sterinova_logo.jpg" alt="Sterinova" class="login-logo" onerror="this.src='/api/branding/logo'" />
           </div>
-          <div class="form-group">
-            <label class="form-label">Contraseña o PIN</label>
-            <input
-              type="password"
-              id="login-clave"
-              class="form-control"
-              placeholder="Ingrese su contraseña o PIN"
-              autocomplete="current-password"
-              required
-            />
-          </div>
-          <button type="submit" class="btn btn-primary btn-block" style="margin-top:14px; padding:14px; font-size:1rem;">
-            Iniciar Sesión →
-          </button>
-        </form>
 
-        ${
-          STATE.deferredInstallPrompt
-            ? `
-          <button type="button" id="btn-install-pwa-login" class="btn btn-action btn-block" style="margin-top:16px;">
-            📲 Instalar como App en este Celular / PC
-          </button>
-        `
-            : ""
-        }
+          <div class="login-title">Bienvenido</div>
+          <div class="login-subtitle">Ingresa tus credenciales para continuar</div>
+
+          <div class="login-mode-tabs" role="tablist">`r`n            <button type="button" class="login-mode-tab ${!isColab ? "active" : ""}" data-login-mode="corporativo">`r`n              ${icon("briefcase", 15)} Gestión Corporativa`r`n            </button>`r`n            <button type="button" class="login-mode-tab ${isColab ? "active" : ""}" data-login-mode="colaborador">`r`n              ${icon("user-circle", 15)} Soy Colaborador`r`n            </button>`r`n          </div>`r`n`r`n          <form id="form-login-unificado">
+            <div class="form-group">
+              <label class="form-label" for="login-identificador">
+                ${isColab ? "ID Biométrico / Número de Cédula" : "Usuario Corporativo"}
+              </label>
+              <div class="login-input-group">
+                <span class="login-input-icon">${icon(isColab ? "id-card" : "user", 17)}</span>
+                <input
+                  type="text"
+                  id="login-identificador"
+                  class="form-control"
+                  placeholder="${isColab ? "Ej: 1003001750 o código de huella" : "Ej: usuario corporativo"}"
+                  autocomplete="username"
+                  required
+                />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="form-label" for="login-clave">
+                ${isColab ? "PIN de Acceso Móvil" : "Contraseña"}
+              </label>
+              <div class="login-input-group">
+                <span class="login-input-icon">${icon("lock", 17)}</span>
+                <input
+                  type="${STATE.showPassword ? "text" : "password"}"
+                  id="login-clave"
+                  class="form-control"
+                  placeholder="${isColab ? "Ingresa tu PIN numérico" : "Ingresa tu contraseña"}"
+                  autocomplete="current-password"
+                  required
+                />
+                <button type="button" id="btn-toggle-pass" class="login-eye-btn" title="Mostrar u ocultar contraseña">
+                  ${icon(STATE.showPassword ? "eye-off" : "eye", 17)}
+                </button>
+              </div>
+            </div>
+
+            <button type="submit" id="btn-submit-login" class="btn btn-primary btn-block" style="margin-top:16px; padding:13px; font-size:0.95rem;">
+              ${icon("log-in", 17)} ${isColab ? "Ingresar al Portal del Colaborador" : "Iniciar Sesión Corporativa"}
+            </button>
+          </form>
+
+          ${
+            STATE.deferredInstallPrompt
+              ? `
+            <button type="button" id="btn-install-pwa-login" class="btn btn-outline btn-block" style="margin-top:12px;">
+              ${icon("smartphone", 17)} Instalar App de Sterinova en este Dispositivo
+            </button>
+          `
+              : ""
+          }
+        </div>
       </div>
     </div>
   `;
 }
 
 function bindLoginEvents() {
-  document.getElementById("btn-theme-login")?.addEventListener("click", toggleDarkMode);
+  document.getElementById("btn-theme-login")?.addEventListener("click", toggleDarkMode);`r`n`r`n  document.querySelectorAll("[data-login-mode]").forEach((btn) => {`r`n    btn.addEventListener("click", () => {`r`n      STATE.loginMode = btn.dataset.loginMode;`r`n      renderApp();`r`n      setTimeout(() => document.getElementById("login-identificador")?.focus(), 20);`r`n    });`r`n  });
+
+  document.getElementById("btn-toggle-pass")?.addEventListener("click", () => {
+    const passEl = document.getElementById("login-clave");
+    const currentVal = passEl ? passEl.value : "";
+    const idVal = document.getElementById("login-identificador")?.value || "";
+    STATE.showPassword = !STATE.showPassword;
+    renderApp();
+    const newId = document.getElementById("login-identificador");
+    const newPass = document.getElementById("login-clave");
+    if (newId) newId.value = idVal;
+    if (newPass) {
+      newPass.value = currentVal;
+      newPass.focus();
+    }
+  });
 
   const form = document.getElementById("form-login-unificado");
   if (form) {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
+      const btnSubmit = document.getElementById("btn-submit-login");
+      const originalHtml = btnSubmit ? btnSubmit.innerHTML : "";
       try {
-        const identificador = document.getElementById("login-identificador").value;
+        if (btnSubmit) {
+          btnSubmit.disabled = true;
+          btnSubmit.innerHTML = `${icon("loader-2", 17)} Verificando credenciales...`;
+          refreshLucideIcons();
+        }
+        const identificador = document.getElementById("login-identificador").value.trim();
         const clave = document.getElementById("login-clave").value;
         const res = await apiFetch("/api/login", {
           method: "POST",
@@ -386,14 +566,22 @@ function bindLoginEvents() {
         });
         const rolEtiqueta = {
           superadmin: "Superadministrador",
-          admin: "Administrador",
-          supervisor: "Supervisor",
-          empleado: "Empleado"
+          admin: "Admin General",
+          supervisor: `Supervisor (${res.user.nombre_area || "Área"})`,
+          auditor: "Auditor de Horas Extras",
+          talento_humano: "Talento Humano (RRHH)",
+          empleado: "Colaborador"
         }[res.user.role] || res.user.role;
+        STATE.showPassword = false;
         showToast(`Bienvenido (${rolEtiqueta}): ${res.user.nombre}`, "success");
         setUser(res.user);
       } catch (err) {
         showToast(err.message, "error");
+        if (btnSubmit) {
+          btnSubmit.disabled = false;
+          btnSubmit.innerHTML = originalHtml;
+          refreshLucideIcons();
+        }
       }
     });
   }
@@ -410,43 +598,104 @@ function bindLoginEvents() {
 }
 
 // ============================================================================
-// MENÚ Y LAYOUT POR ROL (SUPERADMIN, ADMIN, SUPERVISOR)
+// MENÚS ESPECÍFICOS PARA CADA UNO DE LOS ROLES DE GESTIÓN
 // ============================================================================
 
 function getMenuForRole(role) {
   if (role === "superadmin") {
     return [
-      { id: "usuarios", icon: "👑", label: "Usuarios y Roles", step: "SUPERADMIN", short: "Usuarios" },
-      { id: "empleados", icon: "👥", label: "Empleados y Excel", step: "PERSONAL", short: "Empleados" },
-      { id: "dashboard", icon: "📊", label: "Inicio y Resumen", step: "MENÚ", short: "Inicio" },
-      { id: "turnos", icon: "🕒", label: "Catálogo de Turnos", step: "PASO 1", short: "Turnos" },
-      { id: "festivos", icon: "📅", label: "Días Festivos", step: "PASO 2", short: "Festivos" },
-      { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "PASO 3", short: "Asignar" },
-      { id: "procesar", icon: "⚙️", label: "Procesar Huellero", step: "PASO 4", short: "Huellero" },
-      { id: "analisis", icon: "📈", label: "Análisis y Gráficas", step: "PASO 5", short: "Métricas" },
-      { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "MÓVIL", short: "Mapa GPS" }
+      { id: "areas_usuarios", lucide: "shield-check", label: "Áreas y Usuarios", step: "CONFIG", short: "Áreas/Roles" },
+      { id: "empleados", lucide: "users", label: "Base de Empleados", step: "MAESTRO", short: "Empleados" },
+      { id: "festivos", lucide: "calendar-days", label: "Días Festivos", step: "CALENDARIO", short: "Festivos" }
     ];
   }
 
-  if (role === "admin") {
+  if (role === "supervisor") {
     return [
-      { id: "dashboard", icon: "📊", label: "Inicio y Resumen", step: "MENÚ", short: "Inicio" },
-      { id: "turnos", icon: "🕒", label: "Catálogo de Turnos", step: "PASO 1", short: "Turnos" },
-      { id: "festivos", icon: "📅", label: "Días Festivos", step: "PASO 2", short: "Festivos" },
-      { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "PASO 3", short: "Asignar" },
-      { id: "procesar", icon: "⚙️", label: "Procesar Huellero", step: "PASO 4", short: "Huellero" },
-      { id: "analisis", icon: "📈", label: "Análisis y Gráficas", step: "PASO 5", short: "Métricas" },
-      { id: "empleados", icon: "👥", label: "Empleados y Excel", step: "PERSONAL", short: "Empleados" },
-      { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "MÓVIL", short: "Mapa GPS" }
+      { id: "turnos", lucide: "clock", label: "Turnos de Mi Área", step: "PASO 1", short: "Turnos" },
+      { id: "asignacion", lucide: "calendar-range", label: "Asignar Turnos & Gantt", step: "PASO 2", short: "Asignar" },
+      { id: "procesar", lucide: "file-spreadsheet", label: "Validar Huellero y Reportes", step: "PASO 3", short: "Huellero" },
+      { id: "analisis", lucide: "bar-chart-3", label: "Horas Extra y Hoja PDF", step: "PASO 4", short: "Horas Extra" },
+      { id: "gps_solicitudes", lucide: "map-pin", label: "Permisos y Mapa GPS", step: "MI EQUIPO", short: "Permisos/GPS" }
     ];
   }
 
-  // Rol: SUPERVISOR
+  if (role === "auditor") {
+    return [
+      { id: "analisis", lucide: "file-check-2", label: "Auditoría de Horas Extras", step: "CONTROL", short: "Auditoría" },
+      { id: "procesar", lucide: "file-spreadsheet", label: "Generar Reportes / Huellero", step: "LIQUIDAR", short: "Sacar Reporte" },
+      { id: "asignacion", lucide: "calendar-range", label: "Consulta Matriz Gantt", step: "TURNOS", short: "Gantt" },
+      { id: "gps_solicitudes", lucide: "map-pin", label: "Auditoría GPS y Permisos", step: "CAMPO", short: "GPS" }
+    ];
+  }
+
+  if (role === "talento_humano") {
+    return [
+      { id: "rrhh_comunicados", lucide: "megaphone", label: "Memorandos y Permisos", step: "RRHH", short: "Permisos/Memos" },
+      { id: "procesar", lucide: "file-spreadsheet", label: "Validar Huellero y Reportes", step: "MULTI-ÁREA", short: "Huellero" },
+      { id: "analisis", lucide: "bar-chart-3", label: "Horas Extra y Hoja PDF", step: "REPORTES", short: "Horas Extra" },
+      { id: "turnos", lucide: "clock", label: "Turnos (Administrativos)", step: "TURNOS", short: "Turnos" },
+      { id: "asignacion", lucide: "calendar-range", label: "Asignación & Gantt", step: "PROGRAMAR", short: "Asignar" },
+      { id: "empleados", lucide: "users", label: "Base de Empleados", step: "PERSONAL", short: "Empleados" },
+      { id: "festivos", lucide: "calendar-days", label: "Días Festivos", step: "CALENDARIO", short: "Festivos" }
+    ];
+  }
+
   return [
-    { id: "asignacion", icon: "🗓️", label: "Asignación & Gantt", step: "TURNOS", short: "Asignar" },
-    { id: "gps_solicitudes", icon: "🗺️", label: "Mapa GPS y Permisos", step: "CAMPO", short: "Mapa GPS" },
-    { id: "analisis", icon: "📈", label: "Novedades y Gráficas", step: "CONTROL", short: "Novedades" }
+    { id: "dashboard", lucide: "layout-dashboard", label: "Dashboard Ejecutivo", step: "GERENCIA", short: "Resumen" },
+    { id: "analisis", lucide: "bar-chart-3", label: "Métricas, Gráficas y PDF", step: "AUDITORÍA", short: "Métricas" },
+    { id: "supervisores_empleados", lucide: "building-2", label: "Supervisores y Empleados", step: "ESTRUCTURA", short: "Personal" },
+    { id: "gps_solicitudes", lucide: "map-pin", label: "Mapa GPS y Permisos", step: "CONTROL", short: "Mapa GPS" }
   ];
+}
+
+// --- MODAL DE CAMPANA DE NOTIFICACIONES EN TIEMPO REAL ---
+function renderNotificationsBanner() {
+  if (!STATE.showNotifModal) return "";
+  return `
+    <div class="card no-print" style="border:2px solid var(--naranja); background:var(--superficie); margin-bottom:20px;">
+      <div class="card-header">
+        <div class="card-title">🔔 Centro de Notificaciones en Tiempo Real (${STATE.notificaciones.length})</div>
+        <button type="button" id="btn-close-notifs" class="btn btn-outline btn-sm">Cerrar ✖</button>
+      </div>
+      <div class="table-responsive" style="max-height:280px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Fecha/Hora</th>
+              <th>Tipo</th>
+              <th>Título y Mensaje</th>
+              <th>Estado</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              STATE.notificaciones.length === 0
+                ? `<tr><td colspan="4" style="text-align:center; padding:18px;">No tienes notificaciones registradas.</td></tr>`
+                : STATE.notificaciones
+                    .map(
+                      (n) => `
+                <tr>
+                  <td><small>${n.creado_en}</small></td>
+                  <td><span class="badge badge-info">${n.tipo}</span></td>
+                  <td><strong>${n.titulo}</strong><br/><span style="font-size:0.84rem; color:var(--texto-sec);">${n.mensaje}</span></td>
+                  <td>
+                    ${
+                      n.leida
+                        ? '<span class="badge badge-ok">Leída</span>'
+                        : `<button type="button" class="btn btn-primary btn-sm btn-read-notif" data-id="${n.id}">✔ Marcar Leída</button>`
+                    }
+                  </td>
+                </tr>
+              `
+                    )
+                    .join("")
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function renderManagementLayout() {
@@ -456,14 +705,21 @@ function renderManagementLayout() {
     STATE.activeView = navItems[0].id;
   }
   const currentNav = navItems.find((n) => n.id === STATE.activeView) || navItems[0];
-  const pendientes = STATE.solicitudes.filter((s) => s.estado === "PENDIENTE").length;
 
   const roleBadgeMap = {
-    superadmin: { icon: "👑", text: "Superadministrador" },
-    admin: { icon: "🛡️", text: "Administrador" },
-    supervisor: { icon: "👷", text: "Supervisor" }
+    superadmin: { lucide: "shield-check", text: "Superadministrador" },
+    admin: { lucide: "layout-dashboard", text: "Admin General (Ejecutivo)" },
+    supervisor: { lucide: "user-check", text: `Supervisor — ${STATE.user.nombre_area || "Área"}` },
+    auditor: { lucide: "file-check-2", text: "Auditor de Horas Extras" },
+    talento_humano: { lucide: "users", text: "Talento Humano (RRHH)" }
   };
-  const roleInfo = roleBadgeMap[role] || { icon: "👤", text: role };
+  const roleInfo = roleBadgeMap[role] || { lucide: "user", text: role };
+  const initials = (STATE.user.nombre || "U")
+    .split(" ")
+    .map((p) => p[0])
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
 
   return `
     <div class="app-shell">
@@ -472,22 +728,23 @@ function renderManagementLayout() {
           <img src="/api/branding/logo" alt="Sterinova" onerror="this.style.display='none'" />
         </div>
         <div class="sidebar-user">
-          <div class="avatar-circle">${roleInfo.icon}</div>
-          <div>
-            <div style="font-weight:700; font-size:0.92rem;">${STATE.user.nombre}</div>
-            <div style="font-size:0.75rem; opacity:0.8;">${roleInfo.text} (${STATE.user.id})</div>
+          <div class="avatar-circle">${initials}</div>
+          <div style="min-width:0;">
+            <div style="font-weight:700; font-size:0.89rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${STATE.user.nombre}</div>
+            <div style="font-size:0.73rem; color:rgba(255,255,255,0.68); display:flex; align-items:center; gap:5px; margin-top:2px;">
+              ${icon(roleInfo.lucide, 13)} <span>${roleInfo.text}</span>
+            </div>
           </div>
         </div>
+        <div class="sidebar-section-label">Módulos asignados</div>
         <nav class="sidebar-nav">
           ${navItems
             .map(
               (item) => `
             <button type="button" class="nav-btn ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
-              <span>${item.icon}</span>
+              ${icon(item.lucide || "circle", 18)}
               <span>${item.label}</span>
-              <span class="nav-step-badge">${
-                item.id === "gps_solicitudes" && pendientes > 0 ? `${pendientes} Nuevas` : item.step
-              }</span>
+              <span class="nav-step-badge">${item.step}</span>
             </button>
           `
             )
@@ -495,7 +752,7 @@ function renderManagementLayout() {
         </nav>
         <div class="sidebar-footer">
           <button type="button" id="btn-logout" class="btn btn-danger btn-block btn-sm">
-            Cerrar Sesión
+            ${icon("log-out", 15)} Cerrar Sesión
           </button>
         </div>
       </aside>
@@ -503,25 +760,33 @@ function renderManagementLayout() {
       <div class="main-area">
         <header class="topbar">
           <div>
-            <div class="topbar-title">${currentNav.icon} ${currentNav.label}</div>
+            <div class="topbar-breadcrumb">STERINOVA WORKFORCE / ${roleInfo.text}</div>
+            <div class="topbar-title">${icon(currentNav.lucide || "layout-grid", 20)} <span>${currentNav.label}</span></div>
           </div>
           <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-            <button type="button" id="btn-toggle-theme" class="btn btn-outline btn-sm" title="Cambiar tema">
-              ${STATE.darkMode ? "☀️ Claro" : "🌙 Oscuro"}
+            <button type="button" id="btn-toggle-notifs" class="btn btn-outline btn-sm" style="position:relative;">
+              ${icon("bell", 16)} <span>Notificaciones</span>
+              <span id="notif-bell-count" class="badge badge-danger" style="margin-left:4px; display:${
+                STATE.notificacionesNoLeidas > 0 ? "inline-flex" : "none"
+              };">${STATE.notificacionesNoLeidas}</span>
+            </button>
+            <button type="button" id="btn-toggle-theme" class="btn btn-outline btn-sm">
+              ${STATE.darkMode ? `${icon("sun", 16)} Claro` : `${icon("moon", 16)} Oscuro`}
             </button>
             ${
               STATE.deferredInstallPrompt
-                ? `<button type="button" id="btn-install-pwa" class="btn btn-action btn-sm">📲 Instalar App</button>`
+                ? `<button type="button" id="btn-install-pwa" class="btn btn-action btn-sm">${icon("smartphone", 16)} Instalar App</button>`
                 : ""
             }
-            <span class="badge badge-info">${roleInfo.icon} ${roleInfo.text}</span>
+            <span class="badge badge-info">${icon(roleInfo.lucide, 14)} ${roleInfo.text}</span>
             <button type="button" id="btn-top-logout" class="btn btn-danger btn-sm">
-              Salir
+              ${icon("log-out", 15)} Salir
             </button>
           </div>
         </header>
 
         <main class="content-container">
+          ${renderNotificationsBanner()}
           ${renderManagementViewContent()}
         </main>
       </div>
@@ -532,7 +797,7 @@ function renderManagementLayout() {
           .map(
             (item) => `
           <button type="button" class="bottom-nav-item ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
-            <span class="icon">${item.icon}</span>
+            ${icon(item.lucide || "circle", 18)}
             <span>${item.short}</span>
           </button>
         `
@@ -545,8 +810,12 @@ function renderManagementLayout() {
 
 function renderManagementViewContent() {
   switch (STATE.activeView) {
-    case "usuarios":
-      return renderSuperadminUsuarios();
+    case "areas_usuarios":
+      return renderSuperadminAreasYUsuarios();
+    case "supervisores_empleados":
+      return renderAdminGeneralEstructura();
+    case "rrhh_comunicados":
+      return renderTalentoHumanoCentro();
     case "dashboard":
       return renderAdminDashboard();
     case "turnos":
@@ -568,94 +837,458 @@ function renderManagementViewContent() {
   }
 }
 
-// --- VISTA SUPERADMIN: GESTIÓN DE USUARIOS ---
-function renderSuperadminUsuarios() {
+// ============================================================================
+// 1. VISTA SUPERADMIN: GESTIÓN LIBRE DE ÁREAS Y CREACIÓN DE LOS 6 ROLES
+// ============================================================================
+
+function renderSuperadminAreasYUsuarios() {
+  const qUsr = (STATE.searchUsuarios || "").toLowerCase();
+  const usuariosFiltrados = STATE.usuarios.filter(
+    (u) =>
+      u.username.toLowerCase().includes(qUsr) ||
+      u.nombre.toLowerCase().includes(qUsr) ||
+      (u.nombre_area || "").toLowerCase().includes(qUsr) ||
+      u.rol.toLowerCase().includes(qUsr)
+  );
+
   return `
     <div class="alert-banner alert-ok">
       <div>
-        <strong>👑 Control Maestro Superadministrador:</strong> Crea cuentas para tus <strong>Administradores</strong> y <strong>Supervisores</strong>. Luego carga la plantilla de trabajadores en <strong>Empleados y Excel</strong>.
+        <strong>${icon("shield-check", 16)} Configuración Organizacional (Superadmin):</strong> 1) Define las <strong>Áreas</strong> de la empresa. 2) Crea a los <strong>Supervisores</strong> (ligados a su Área), al <strong>Auditor de Horas Extras</strong>, a <strong>Talento Humano</strong> y al <strong>Admin General</strong>.
       </div>
       <button type="button" class="btn btn-primary btn-sm" data-goto="empleados">
-        Subir Excel de Empleados →
+        ${icon("users", 15)} Ir a Base de Empleados →
       </button>
     </div>
 
     <div class="grid-2">
+      <!-- Módulo de Áreas -->
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Crear / Actualizar Usuario del Sistema</div>
+          <div class="card-title">${icon("building-2", 18)} <span>1. Gestión de Áreas de la Empresa (${STATE.areas.length})</span></div>
+        </div>
+        <form id="form-area">
+          <input type="hidden" id="area-id" value="" />
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Nombre del Área</label>
+              <input type="text" id="area-nombre" class="form-control" placeholder="Ej: Producción, Calidad, Conductores..." required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Descripción</label>
+              <input type="text" id="area-desc" class="form-control" placeholder="Descripción opcional" />
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; margin-bottom:16px;">
+            <button type="submit" class="btn btn-primary" style="flex:1;">${icon("save", 16)} Guardar Área</button>
+            <button type="button" id="btn-limpiar-area" class="btn btn-outline">Limpiar</button>
+          </div>
+        </form>
+
+        <div class="table-responsive" style="max-height:260px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Área</th>
+                <th>Supervisores</th>
+                <th>Empleados</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${STATE.areas
+                .map(
+                  (a) => `
+                <tr>
+                  <td><strong>${a.nombre}</strong><br/><small style="color:var(--texto-sec);">${a.descripcion}</small></td>
+                  <td><span class="badge badge-info">${a.total_supervisores} sup.</span></td>
+                  <td><span class="badge badge-ok">${a.total_empleados} emp.</span></td>
+                  <td>
+                    <button type="button" class="btn btn-outline btn-sm btn-edit-area" data-id="${a.id}" data-nombre="${a.nombre}" data-desc="${a.descripcion}">${icon("pencil", 14)} Editar</button>
+                    <button type="button" class="btn btn-danger btn-sm btn-del-area" data-id="${a.id}">${icon("trash-2", 14)}</button>
+                  </td>
+                </tr>
+              `
+                )
+                .join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Módulo de Usuarios y Roles -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">${icon("user-plus", 18)} <span>2. Crear / Asignar Usuarios por Rol y Área</span></div>
         </div>
         <form id="form-usuario-sistema">
           <div class="grid-2">
             <div class="form-group">
               <label class="form-label">Usuario de Ingreso (Username)</label>
-              <input type="text" id="usr-username" class="form-control" placeholder="Ej: admin_rrhh o sup_planta" required />
+              <input type="text" id="usr-username" class="form-control" placeholder="Ej: sup_produccion, auditor1, rrhh" required />
             </div>
             <div class="form-group">
-              <label class="form-label">Rol Asignado</label>
+              <label class="form-label">Rol del Usuario</label>
               <select id="usr-rol" class="form-control">
-                <option value="admin">🛡️ Administrador (Gestión, Huellero y Nómina)</option>
-                <option value="supervisor">👷 Supervisor (Turnos, Mapa GPS y Permisos)</option>
-                <option value="superadmin">👑 Superadministrador (Control Total)</option>
+                <option value="supervisor">Supervisor de Área (Turnos, Huellero y Permisos de su Área)</option>
+                <option value="auditor">Auditor de Horas Extras (Control y Reportes de Horas Extra)</option>
+                <option value="talento_humano">Talento Humano (Permisos, Memorandos y Multi-Área)</option>
+                <option value="admin">Admin General (Gerencia: Consulta Global y Métricas)</option>
+                <option value="superadmin">Superadministrador (Control Maestro)</option>
               </select>
             </div>
           </div>
-          <div class="grid-2">
+          <div class="grid-3">
+            <div class="form-group">
+              <label class="form-label">Área Ligada (Obligatoria p/ Supervisor)</label>
+              <select id="usr-area" class="form-control">
+                <option value="">-- Global / Todas las Áreas --</option>
+                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+              </select>
+            </div>
             <div class="form-group">
               <label class="form-label">Nombre Completo</label>
               <input type="text" id="usr-nombre" class="form-control" placeholder="Nombre y Apellido" required />
             </div>
             <div class="form-group">
               <label class="form-label">Contraseña</label>
-              <input type="password" id="usr-password" class="form-control" placeholder="Asignar contraseña" required />
+              <input type="password" id="usr-password" class="form-control" placeholder="Contraseña" required />
             </div>
           </div>
           <div style="display:flex; gap:10px;">
-            <button type="submit" class="btn btn-primary" style="flex:1;">💾 Guardar Usuario</button>
+            <button type="submit" class="btn btn-primary" style="flex:1;">${icon("save", 16)} Guardar Usuario</button>
             <button type="button" id="btn-limpiar-usr" class="btn btn-outline">Limpiar</button>
           </div>
         </form>
       </div>
+    </div>
 
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">${icon("users", 18)} <span>Directorio de Usuarios del Sistema (${usuariosFiltrados.length} / ${STATE.usuarios.length})</span></div>
+        <div class="search-input-wrap">
+          <input type="text" id="search-usuarios-table" class="form-control" placeholder="Buscar por usuario, nombre, rol o área..." value="${STATE.searchUsuarios || ""}" />
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table>
+          <thead>
+            <tr>
+              <th>Usuario</th>
+              <th>Nombre</th>
+              <th>Rol Asignado</th>
+              <th>Área Ligada</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${usuariosFiltrados
+              .map((u) => {
+                const roleBadges = {
+                  superadmin: `<span class="badge badge-danger">${icon("shield-check", 13)} Superadmin</span>`,
+                  admin: `<span class="badge badge-info">${icon("layout-dashboard", 13)} Admin General</span>`,
+                  supervisor: `<span class="badge badge-ok">${icon("user-check", 13)} Supervisor</span>`,
+                  auditor: `<span class="badge badge-warn">${icon("file-check-2", 13)} Auditor Horas Extras</span>`,
+                  talento_humano: `<span class="badge badge-info">${icon("users", 13)} Talento Humano</span>`
+                };
+                return `
+                  <tr>
+                    <td><strong>${u.username}</strong></td>
+                    <td>${u.nombre}</td>
+                    <td>${roleBadges[u.rol] || u.rol}</td>
+                    <td><strong>${u.nombre_area || "Global / Todas las Áreas"}</strong></td>
+                    <td>
+                      <button type="button" class="btn btn-outline btn-sm btn-edit-usr" data-user="${u.username}">${icon("pencil", 14)} Editar</button>
+                      <button type="button" class="btn btn-danger btn-sm btn-del-usr" data-user="${u.username}">${icon("trash-2", 14)} Eliminar</button>
+                    </td>
+                  </tr>
+                `;
+              })
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================================
+// 2. VISTA ADMIN GENERAL: SUPERVISORES, ÁREAS Y EMPLEADOS (SOLO CONSULTA)
+// ============================================================================
+
+function renderAdminGeneralEstructura() {
+  const supervisores = STATE.usuarios.filter((u) => u.rol === "supervisor");
+  return `
+    <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Cuentas de Gestión Registradas (${STATE.usuarios.length})</div>
+          <div class="card-title">👷 Supervisores por Área (${supervisores.length})</div>
         </div>
         <div class="table-responsive">
           <table>
             <thead>
               <tr>
+                <th>Supervisor</th>
                 <th>Usuario</th>
-                <th>Nombre</th>
-                <th>Rol</th>
-                <th>Acciones</th>
+                <th>Área Asignada</th>
               </tr>
             </thead>
             <tbody>
-              ${STATE.usuarios
-                .map((u) => {
-                  const badge =
-                    u.rol === "superadmin"
-                      ? '<span class="badge badge-danger">👑 Superadmin</span>'
-                      : u.rol === "admin"
-                      ? '<span class="badge badge-info">🛡️ Administrador</span>'
-                      : '<span class="badge badge-ok">👷 Supervisor</span>';
-                  return `
-                    <tr>
-                      <td><strong>${u.username}</strong></td>
-                      <td>${u.nombre}</td>
-                      <td>${badge}</td>
-                      <td>
-                        <button type="button" class="btn btn-outline btn-sm btn-edit-usr" data-user="${u.username}">Editar</button>
-                        <button type="button" class="btn btn-danger btn-sm btn-del-usr" data-user="${u.username}">Eliminar</button>
-                      </td>
-                    </tr>
-                  `;
-                })
+              ${
+                supervisores.length === 0
+                  ? `<tr><td colspan="3" style="text-align:center; padding:18px;">No hay supervisores registrados aún.</td></tr>`
+                  : supervisores
+                      .map(
+                        (s) => `
+                  <tr>
+                    <td><strong>${s.nombre}</strong></td>
+                    <td><code>${s.username}</code></td>
+                    <td><span class="badge badge-ok">${s.nombre_area}</span></td>
+                  </tr>
+                `
+                      )
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">🏛️ Resumen por Áreas (${STATE.areas.length})</div>
+        </div>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Área</th>
+                <th>Supervisores</th>
+                <th>Empleados</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${STATE.areas
+                .map(
+                  (a) => `
+                <tr>
+                  <td><strong>${a.nombre}</strong></td>
+                  <td>${a.total_supervisores}</td>
+                  <td><strong>${a.total_empleados}</strong></td>
+                </tr>
+              `
+                )
                 .join("")}
             </tbody>
           </table>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">👥 Plantilla Global de Empleados (${STATE.empleados.length})</div>
+      </div>
+      <div class="table-responsive" style="max-height:460px;">
+        <table>
+          <thead>
+            <tr>
+              <th>ID Biométrico</th>
+              <th>Nombre Completo</th>
+              <th>Área Asignada</th>
+              <th>Cargo</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${STATE.empleados
+              .map(
+                (e) => `
+              <tr>
+                <td><strong>${e.id_empleado}</strong></td>
+                <td>${e.nombre}</td>
+                <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
+                <td>${e.cargo || "Operario"}</td>
+              </tr>
+            `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================================
+// 3. VISTA TALENTO HUMANO: MEMORANDOS/CAPACITACIONES + PERMISOS + REPORTE EXCEL
+// ============================================================================
+
+function renderTalentoHumanoCentro() {
+  return `
+    <div class="grid-2">
+      <!-- Envío de Memorandos, Capacitaciones y Comunicados con Notificación en Tiempo Real -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📢 Enviar Memorando, Citación a Capacitación o Comunicado</div>
+        </div>
+        <form id="form-comunicado">
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Tipo de Comunicado</label>
+              <select id="com-tipo" class="form-control">
+                <option value="CAPACITACIÓN">🎓 Citación a Capacitación</option>
+                <option value="MEMORANDO">📋 Memorando Oficial</option>
+                <option value="COMUNICADO RRHH">📢 Comunicado General RRHH</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Fecha/Hora del Evento (Opcional)</label>
+              <input type="text" id="com-fecha" class="form-control" placeholder="Ej: Viernes 27 Nov - 2:00 PM" />
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Dirigido a</label>
+              <select id="com-destino-tipo" class="form-control">
+                <option value="TODOS">🏢 Toda la Empresa</option>
+                <option value="AREA">🏛️ Un Área Específica</option>
+                <option value="EMPLEADO">👤 Un Empleado Específico</option>
+              </select>
+            </div>
+            <div class="form-group" id="com-destino-valor-wrap">
+              <label class="form-label">Seleccionar Área o Empleado</label>
+              <select id="com-destino-valor" class="form-control">
+                <option value="">-- Toda la Empresa --</option>
+                <optgroup label="Áreas">
+                  ${STATE.areas.map((a) => `<option value="AREA:${a.id}">Área: ${a.nombre}</option>`).join("")}
+                </optgroup>
+                <optgroup label="Empleados">
+                  ${STATE.empleados.map((e) => `<option value="EMP:${e.id_empleado}">${e.id_empleado} - ${e.nombre}</option>`).join("")}
+                </optgroup>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Título / Asunto</label>
+            <input type="text" id="com-titulo" class="form-control" placeholder="Ej: Capacitación obligatoria en Seguridad y Salud en el Trabajo" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Mensaje Detallado</label>
+            <textarea id="com-mensaje" class="form-control" rows="3" placeholder="Escribe los detalles del memorando o capacitación..." required></textarea>
+          </div>
+          <button type="submit" class="btn btn-action btn-block">
+            🔔 Enviar y Notificar en Tiempo Real a los Celulares
+          </button>
+        </form>
+      </div>
+
+      <!-- Historial de Memorandos y Confirmaciones de Lectura -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📬 Memorandos y Capacitaciones Enviadas (${STATE.comunicados.length})</div>
+        </div>
+        <div class="table-responsive" style="max-height:380px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Tipo / Fecha</th>
+                <th>Asunto y Mensaje</th>
+                <th>Destinatario</th>
+                <th>Confirmados</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                STATE.comunicados.length === 0
+                  ? `<tr><td colspan="4" style="text-align:center; padding:22px;">Aún no se han enviado memorandos ni capacitaciones.</td></tr>`
+                  : STATE.comunicados
+                      .map(
+                        (c) => `
+                  <tr>
+                    <td>
+                      <span class="badge badge-info">${c.tipo}</span><br/>
+                      <small>${c.creado_en}</small>
+                    </td>
+                    <td>
+                      <strong>${c.titulo}</strong>
+                      ${c.fecha_evento ? `<br/><small style="color:var(--naranja); font-weight:700;">📅 ${c.fecha_evento}</small>` : ""}
+                      <br/><small style="color:var(--texto-sec);">${c.mensaje}</small>
+                    </td>
+                    <td><span class="badge badge-ok">${c.destino_etiqueta}</span></td>
+                    <td><strong>${c.total_lecturas} leído(s)</strong></td>
+                  </tr>
+                `
+                      )
+                      .join("")
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gestión Final de Permisos (Avalados por Supervisor) y Exportación Excel -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">📝 Gestión de Permisos y Solicitudes de Empleados (${STATE.solicitudes.length})</div>
+        <button type="button" id="btn-exportar-permisos" class="btn btn-primary btn-sm">
+          📥 Exportar Reporte Excel de Permisos y Ausentismo
+        </button>
+      </div>
+      <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:12px;">
+        Flujo: El empleado solicita → Su Supervisor de Área la avala (<code>AVALADO_SUPERVISOR</code>) → Talento Humano da la aprobación final (<code>APROBADA</code>).
+      </p>
+      <div class="table-responsive" style="max-height:420px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Empleado / Área</th>
+              <th>Tipo / Fechas</th>
+              <th>Motivo</th>
+              <th>Aval Supervisor</th>
+              <th>Estado Actual</th>
+              <th>Decisión Final RRHH</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              STATE.solicitudes.length === 0
+                ? `<tr><td colspan="6" style="text-align:center; padding:22px;">No hay solicitudes de permisos registradas.</td></tr>`
+                : STATE.solicitudes
+                    .map((s) => {
+                      let badge = "badge-warn";
+                      if (s.estado === "APROBADA") badge = "badge-ok";
+                      else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
+                      else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
+                      return `
+                  <tr>
+                    <td>
+                      <strong>${s.nombre_empleado}</strong> (ID: ${s.id_empleado})<br/>
+                      <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
+                    </td>
+                    <td><strong>${s.tipo}</strong><br/><small>${s.fecha_inicio} a ${s.fecha_fin}</small></td>
+                    <td>${s.motivo}</td>
+                    <td><small>${s.supervisor_usuario ? `✔ ${s.supervisor_usuario}` : "Pendiente Supervisor"}</small></td>
+                    <td><span class="badge ${badge}">${s.estado}</span></td>
+                    <td>
+                      ${
+                        s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")
+                          ? `
+                        <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">✔ Aprobar RRHH</button>
+                        <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA">✖ Rechazar</button>
+                      `
+                          : `<small>${s.rrhh_usuario || s.respuesta_admin || "Cerrada"}</small>`
+                      }
+                    </td>
+                  </tr>
+                `;
+                    })
+                    .join("")
+            }
+          </tbody>
+        </table>
       </div>
     </div>
   `;
@@ -672,77 +1305,47 @@ function renderAdminDashboard() {
     kpis: { horas_extra: 0, minutos_tardanza: 0, ausencias: 0, llegadas_tempranas: 0 },
     solicitudes_pendientes: 0
   };
-
-  const steps = [
-    {
-      step: "PASO 1",
-      title: "Catálogo de Turnos",
-      desc: "Crear plantillas de jornada con colores identificadores, tolerancias y cruces de medianoche.",
-      view: "turnos",
-      meta: `${d.total_turnos} turnos activos`
-    },
-    {
-      step: "PASO 2",
-      title: "Días Festivos",
-      desc: "Registrar calendario no laboral o cargar automáticamente los festivos de Colombia (Ley Emiliani).",
-      view: "festivos",
-      meta: `${STATE.festivos.length} festivos`
-    },
-    {
-      step: "PASO 3",
-      title: "Asignación & Matriz Gantt",
-      desc: "Programar turnos en calendario interactivo, por patrón semanal o ver la matriz Gantt de todo el personal.",
-      view: "asignacion",
-      meta: d.ultima_fecha_asignada ? `Hasta ${d.ultima_fecha_asignada}` : "Sin asignaciones"
-    },
-    {
-      step: "PASO 4",
-      title: "Procesar Huellero (Drag & Drop)",
-      desc: "Arrastrar archivos Excel del biométrico con vista previa instantánea y generar reportes corporativos.",
-      view: "procesar",
-      meta: `${STATE.reportes.length} reportes Excel`
-    },
-    {
-      step: "PASO 5",
-      title: "Análisis, Gráficas y Hoja PDF",
-      desc: "Gráficas de recargos (ED, EN, EF, END, RN, RND, RF), vista previa de Hoja de Turnos e impresión PDF.",
-      view: "analisis",
-      meta: `${(d.kpis?.horas_extra || 0).toFixed(2)} h extra`
-    },
-    {
-      step: "MAPA GPS & PERSONAL",
-      title: "Mapa GPS en Vivo, Selfie y Permisos",
-      desc: "Ver en el mapa interactivo dónde marcó cada empleado con dirección, foto selfie y aprobar solicitudes.",
-      view: "gps_solicitudes",
-      meta: `${STATE.marcacionesMoviles.length} marcas GPS`
-    }
-  ];
+  const isReadOnlyAdmin = STATE.user?.role === "admin";
 
   return `
     <div class="alert-banner alert-${d.nivel_alerta || "ok"}">
       <div>
-        <strong>Estado de Programación:</strong> ${d.mensaje_alerta}
+        <strong>${icon("activity", 16)} Estado de Programación:</strong> ${d.mensaje_alerta}
       </div>
-      <button type="button" class="btn btn-primary btn-sm" data-goto="asignacion">
-        Programar Turnos →
-      </button>
+      ${
+        !isReadOnlyAdmin
+          ? `<button type="button" class="btn btn-primary btn-sm" data-goto="asignacion">${icon("calendar-range", 15)} Programar Turnos →</button>`
+          : `<button type="button" class="btn btn-primary btn-sm" data-goto="analisis">${icon("bar-chart-3", 15)} Ver Métricas y Reportes →</button>`
+      }
     </div>
 
     <div class="grid-4" style="margin-bottom:20px;">
-      <div class="kpi-card" data-goto="empleados">
-        <div class="kpi-label">Empleados Activos</div>
-        <div class="kpi-value">${d.total_empleados}</div>
-      </div>
-      <div class="kpi-card" data-goto="turnos">
-        <div class="kpi-label">Turnos del Catálogo</div>
-        <div class="kpi-value">${d.total_turnos}</div>
+      <div class="kpi-card" data-goto="${isReadOnlyAdmin ? "supervisores_empleados" : "empleados"}">
+        <div class="kpi-top">
+          <div class="kpi-label">Empleados Activos / Áreas</div>
+          <div class="kpi-icon-box">${icon("users", 20)}</div>
+        </div>
+        <div class="kpi-value">${d.total_empleados} / ${STATE.areas.length}</div>
       </div>
       <div class="kpi-card" data-goto="analisis">
-        <div class="kpi-label">Total Horas Extras</div>
-        <div class="kpi-value">${Number(d.kpis?.horas_extra || 0).toFixed(2)}</div>
+        <div class="kpi-top">
+          <div class="kpi-label">Total Horas Extras</div>
+          <div class="kpi-icon-box">${icon("clock", 20)}</div>
+        </div>
+        <div class="kpi-value">${Number(d.kpis?.horas_extra || 0).toFixed(2)} h</div>
+      </div>
+      <div class="kpi-card" data-goto="analisis">
+        <div class="kpi-top">
+          <div class="kpi-label">Ausencias / Tardanzas</div>
+          <div class="kpi-icon-box">${icon("alert-triangle", 20)}</div>
+        </div>
+        <div class="kpi-value">${d.kpis?.ausencias || 0} / ${d.kpis?.minutos_tardanza || 0}m</div>
       </div>
       <div class="kpi-card" data-goto="gps_solicitudes">
-        <div class="kpi-label">Marcas GPS / Permisos</div>
+        <div class="kpi-top">
+          <div class="kpi-label">Marcas GPS / Permisos</div>
+          <div class="kpi-icon-box">${icon("map-pin", 20)}</div>
+        </div>
         <div class="kpi-value">${STATE.marcacionesMoviles.length} / ${STATE.solicitudes.length}</div>
       </div>
     </div>
@@ -750,59 +1353,54 @@ function renderAdminDashboard() {
     <div class="grid-2" style="margin-bottom:20px;">
       <div class="card" style="margin-bottom:0;">
         <div class="card-header">
-          <div class="card-title">📊 Distribución de Horas Extra y Recargos</div>
+          <div class="card-title">${icon("bar-chart-3", 18)} <span>Distribución Global de Horas Extra y Recargos</span></div>
         </div>
-        <div style="height:220px; position:relative;">
+        <div style="height:230px; position:relative;">
           <canvas id="chart-recargos"></canvas>
         </div>
       </div>
       <div class="card" style="margin-bottom:0;">
         <div class="card-header">
-          <div class="card-title">🎯 Comportamiento de Asistencia</div>
+          <div class="card-title">${icon("pie-chart", 18)} <span>Comportamiento Global de Asistencia</span></div>
         </div>
-        <div style="height:220px; position:relative;">
+        <div style="height:230px; position:relative;">
           <canvas id="chart-estados"></canvas>
         </div>
       </div>
     </div>
-
-    <div class="grid-3">
-      ${steps
-        .map(
-          (s) => `
-        <div class="card" style="margin-bottom:0; display:flex; flex-direction:column; justify-content:space-between;">
-          <div>
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-              <span class="badge badge-info" style="color:var(--naranja); background:var(--naranja-light);">${s.step}</span>
-              <span class="badge badge-info">${s.meta}</span>
-            </div>
-            <div class="card-title" style="margin-bottom:6px;">${s.title}</div>
-            <p style="font-size:0.88rem; color:var(--texto-sec); margin-bottom:16px;">${s.desc}</p>
-          </div>
-          <button type="button" class="btn btn-primary btn-block" data-goto="${s.view}">
-            Abrir Módulo
-          </button>
-        </div>
-      `
-        )
-        .join("")}
-    </div>
   `;
 }
 
-// --- VISTA 1: CATÁLOGO DE TURNOS CON COLORES ---
+// --- VISTA 1: CATÁLOGO DE TURNOS (POR ÁREA O GLOBAL) ---
 function renderAdminTurnos() {
+  const isSup = STATE.user.role === "supervisor";
   return `
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title" id="turno-form-title">Nuevo Turno / Plantilla de Jornada</div>
+          <div class="card-title" id="turno-form-title">
+            ${isSup ? `Crear / Editar Turno para ${STATE.user.nombre_area}` : "Crear / Editar Plantilla de Turno"}
+          </div>
         </div>
         <form id="form-turno">
           <input type="hidden" id="turno-id" value="" />
-          <div class="form-group">
-            <label class="form-label">Nombre del Turno</label>
-            <input type="text" id="turno-nombre" class="form-control" placeholder="Ej: Produccion Horario 1" required />
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">Nombre del Turno</label>
+              <input type="text" id="turno-nombre" class="form-control" placeholder="Ej: Turno Mañana 06 a 14" required />
+            </div>
+            <div class="form-group">
+              <label class="form-label">Área del Turno</label>
+              ${
+                isSup
+                  ? `<input type="text" class="form-control" value="${STATE.user.nombre_area}" disabled />
+                     <input type="hidden" id="turno-area" value="${STATE.user.id_area || ""}" />`
+                  : `<select id="turno-area" class="form-control">
+                      <option value="">-- Global (Todas las Áreas) --</option>
+                      ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+                    </select>`
+              }
+            </div>
           </div>
           <div class="grid-2">
             <div class="form-group">
@@ -816,11 +1414,11 @@ function renderAdminTurnos() {
           </div>
           <div class="grid-2">
             <div class="form-group">
-              <label class="form-label">Tolerancia (minutos)</label>
+              <label class="form-label">Tolerancia llegada tarde (min)</label>
               <input type="number" id="turno-tolerancia" class="form-control" value="10" min="0" />
             </div>
             <div class="form-group">
-              <label class="form-label">Descanso intermedio (minutos)</label>
+              <label class="form-label">Descanso intermedio (min)</label>
               <input type="number" id="turno-descanso" class="form-control" value="0" min="0" />
             </div>
           </div>
@@ -833,16 +1431,16 @@ function renderAdminTurnos() {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Turnos Registrados (${STATE.turnos.length})</div>
+          <div class="card-title">Turnos Disponibles (${STATE.turnos.length})</div>
         </div>
         <div class="table-responsive">
           <table>
             <thead>
               <tr>
-                <th>Color / Nombre</th>
-                <th>Entrada</th>
-                <th>Salida</th>
-                <th>Cruza Medianoche</th>
+                <th>Turno</th>
+                <th>Área</th>
+                <th>Horario</th>
+                <th>Tipo</th>
                 <th>Acciones</th>
               </tr>
             </thead>
@@ -859,11 +1457,11 @@ function renderAdminTurnos() {
                     <span style="display:inline-block; width:12px; height:12px; border-radius:4px; background:${color}; margin-right:8px;"></span>
                     <strong>${t.nombre}</strong>
                   </td>
-                  <td>${t.hora_entrada}</td>
-                  <td>${t.hora_salida}</td>
+                  <td><span class="badge badge-info">${t.nombre_area || "Global"}</span></td>
+                  <td>${t.hora_entrada} - ${t.hora_salida}</td>
                   <td>${
                     t.cruza_medianoche
-                      ? '<span class="badge badge-warn">🌙 Sí (Nocturno)</span>'
+                      ? '<span class="badge badge-warn">🌙 Nocturno</span>'
                       : '<span class="badge badge-ok">☀️ Diurno</span>'
                   }</td>
                   <td>
@@ -956,14 +1554,14 @@ function renderAdminFestivos() {
   `;
 }
 
-// --- VISTA 3: ASIGNACIÓN DE TURNOS + MATRIZ GANTT MENSUAL ---
+// --- VISTA 3: ASIGNACIÓN DE TURNOS + MATRIZ GANTT ---
 function renderAdminAsignacion() {
   const [year, month] = STATE.calMonth.split("-").map(Number);
   const firstDay = new Date(year, month - 1, 1);
   const daysInMonth = new Date(year, month, 0).getDate();
   const startWeekday = (firstDay.getDay() + 6) % 7;
-
   const festivosSet = new Set(STATE.festivos.map((f) => f.fecha));
+  const isAuditor = STATE.user.role === "auditor";
 
   const modeSwitcher = `
     <div class="card" style="padding:14px 20px; margin-bottom:18px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px;">
@@ -972,7 +1570,7 @@ function renderAdminAsignacion() {
           🗓️ Calendario Interactivo & Patrones
         </button>
         <button type="button" class="btn ${STATE.asignacionModoVista === "matriz" ? "btn-primary" : "btn-outline"} btn-sm" data-asig-mode="matriz">
-          📊 Matriz Gantt Mensual (Todos los Empleados)
+          📊 Matriz Gantt Mensual (${STATE.user.role === "supervisor" ? STATE.user.nombre_area : "Personal"})
         </button>
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
@@ -982,14 +1580,12 @@ function renderAdminAsignacion() {
     </div>
   `;
 
-  if (STATE.asignacionModoVista === "matriz") {
-    // Construir mapa empleado -> fecha -> asignacion
+  if (STATE.asignacionModoVista === "matriz" || isAuditor) {
     const mapEmpFecha = {};
     STATE.asignaciones.forEach((a) => {
       if (!mapEmpFecha[a.id_empleado]) mapEmpFecha[a.id_empleado] = {};
       mapEmpFecha[a.id_empleado][a.fecha] = a;
     });
-
     const daysArray = Array.from({ length: daysInMonth }, (_, i) => i + 1);
 
     return `
@@ -1012,7 +1608,7 @@ function renderAdminAsignacion() {
           <table class="gantt-table">
             <thead>
               <tr>
-                <th style="position:sticky; left:0; z-index:10; min-width:200px;">Empleado</th>
+                <th style="position:sticky; left:0; z-index:10; min-width:220px;">Empleado (Área)</th>
                 ${daysArray
                   .map((d) => {
                     const fIso = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
@@ -1025,14 +1621,14 @@ function renderAdminAsignacion() {
             <tbody>
               ${
                 STATE.empleados.length === 0
-                  ? `<tr><td colspan="${daysInMonth + 1}" style="padding:24px;">No hay empleados cargados.</td></tr>`
+                  ? `<tr><td colspan="${daysInMonth + 1}" style="padding:24px;">No hay empleados cargados en esta área.</td></tr>`
                   : STATE.empleados
                       .map((emp) => {
                         const rowMap = mapEmpFecha[emp.id_empleado] || {};
                         return `
                     <tr>
                       <td style="position:sticky; left:0; background:var(--superficie); text-align:left; font-weight:700; white-space:nowrap;">
-                        ${emp.id_empleado} - ${emp.nombre.slice(0, 22)}
+                        ${emp.id_empleado} - ${emp.nombre.slice(0, 20)} <small style="color:var(--texto-sec);">(${emp.nombre_area || ""})</small>
                       </td>
                       ${daysArray
                         .map((d) => {
@@ -1078,9 +1674,7 @@ function renderAdminAsignacion() {
   });
 
   const cells = [];
-  for (let i = 0; i < startWeekday; i++) {
-    cells.push(`<div class="cal-day empty"></div>`);
-  }
+  for (let i = 0; i < startWeekday; i++) cells.push(`<div class="cal-day empty"></div>`);
   for (let d = 1; d <= daysInMonth; d++) {
     const fechaIso = `${year}-${String(month).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
     const isSelected = STATE.selectedDates.has(fechaIso);
@@ -1137,7 +1731,7 @@ function renderAdminAsignacion() {
         <div class="emp-list-box">
           ${
             empleadosFiltrados.length === 0
-              ? `<div style="padding:18px; text-align:center; color:var(--texto-sec);">No hay empleados registrados.</div>`
+              ? `<div style="padding:18px; text-align:center; color:var(--texto-sec);">No hay empleados registrados en esta área.</div>`
               : empleadosFiltrados
                   .map((e) => {
                     const checked = STATE.selectedEmployees.has(e.id_empleado);
@@ -1146,7 +1740,7 @@ function renderAdminAsignacion() {
                   <input type="checkbox" ${checked ? "checked" : ""} style="pointer-events:none;" />
                   <div>
                     <div style="font-weight:700;">${e.nombre}</div>
-                    <div style="font-size:0.76rem; color:var(--texto-sec);">ID: ${e.id_empleado}</div>
+                    <div style="font-size:0.75rem; color:var(--texto-sec);">ID: ${e.id_empleado} | ${e.nombre_area || "Sin Área"}</div>
                   </div>
                 </div>
               `;
@@ -1249,28 +1843,40 @@ function renderAdminAsignacion() {
   `;
 }
 
-// --- VISTA 4: PROCESAR HUELLERO CON DRAG & DROP Y VISTA PREVIA ---
+// ============================================================================
+// 4. PROCESAR HUELLERO Y GENERAR REPORTES (INDIVIDUALES O AGRUPADOS POR ÁREA)
+// Disponible para: Supervisor (su Área), Auditor de Horas Extras (Todas) y Talento Humano (Administrativos o Todas)
+// ============================================================================
+
 function renderAdminProcesar() {
   const now = new Date();
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, "0");
   const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
   const prev = STATE.huelleroPreview;
+  const isSup = STATE.user.role === "supervisor";
+
+  const selectedArea = isSup ? String(STATE.user.id_area || "") : STATE.huelleroFiltroArea;
+  const empleadosDelArea = STATE.empleados.filter(
+    (e) => !selectedArea || String(e.id_area || "") === String(selectedArea)
+  );
 
   return `
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Paso 4: Zona Drag & Drop de Huellero + Vista Previa</div>
+          <div class="card-title">
+            ⚙️ Validar Horas Extras con Huellero y Generar Reportes (Individual o Agrupado)
+          </div>
         </div>
         <form id="form-procesar-huellero">
           <div id="huellero-dropzone" class="dropzone-box">
             <div style="font-size:2.2rem; margin-bottom:6px;">📂</div>
             <div style="font-weight:800; font-size:1rem; color:var(--petroleo);">
-              Arrastra y suelta aquí los archivos Excel del Huellero (.xlsx / .xls)
+              Arrastra y suelta aquí el Excel del Huellero (.xlsx / .xls)
             </div>
-            <div style="font-size:0.84rem; color:var(--texto-sec); margin-top:4px;">
-              o haz clic para examinar en tu dispositivo (se previsualizarán al instante)
+            <div style="font-size:0.83rem; color:var(--texto-sec); margin-top:4px;">
+              El huellero solo se usa para cruzar marcaciones contra los turnos programados
             </div>
             <input type="file" id="proc-files" accept=".xlsx,.xls" multiple style="display:none;" />
           </div>
@@ -1280,18 +1886,44 @@ function renderAdminProcesar() {
               ? `
             <div class="alert-banner alert-ok" style="flex-direction:column; align-items:flex-start;">
               <div>
-                <strong>✅ Vista Previa Detectada:</strong> ${prev.total_marcaciones} marcaciones válidas de <strong>${prev.total_empleados} empleados</strong> (${prev.fecha_min || "—"} al ${prev.fecha_max || "—"}).
-              </div>
-              <div style="font-size:0.8rem; width:100%; max-height:130px; overflow-y:auto; margin-top:6px; background:var(--superficie); padding:8px; border-radius:8px;">
-                ${prev.muestra
-                  .slice(0, 8)
-                  .map((r) => `<div>• <strong>${r.id_empleado}</strong> (${r.nombre}) — ${r.fecha} a las ${r.hora}</div>`)
-                  .join("")}
+                <strong>✅ Vista Previa del Huellero:</strong> ${prev.total_marcaciones} marcaciones detectadas (${prev.fecha_min || "—"} al ${prev.fecha_max || "—"}).
               </div>
             </div>
           `
               : ""
           }
+
+          <div class="grid-2">
+            <div class="form-group">
+              <label class="form-label">1. Área a Validar / Liquidar</label>
+              ${
+                isSup
+                  ? `<input type="text" class="form-control" value="${STATE.user.nombre_area}" disabled />
+                     <input type="hidden" id="proc-area" value="${STATE.user.id_area || ""}" />`
+                  : `<select id="proc-area" class="form-control">
+                      <option value="">🏢 Todas las Áreas (Consolidado)</option>
+                      ${STATE.areas
+                        .map(
+                          (a) =>
+                            `<option value="${a.id}" ${String(selectedArea) === String(a.id) ? "selected" : ""}>Área: ${a.nombre}</option>`
+                        )
+                        .join("")}
+                    </select>`
+              }
+            </div>
+            <div class="form-group">
+              <label class="form-label">2. Tipo de Reporte (Agrupado o Individual)</label>
+              <select id="proc-empleado" class="form-control">
+                <option value="TODOS">👥 Agrupado (Todos los empleados del área)</option>
+                ${empleadosDelArea
+                  .map(
+                    (e) =>
+                      `<option value="${e.id_empleado}" ${STATE.huelleroFiltroEmpleado === e.id_empleado ? "selected" : ""}>👤 Individual: ${e.id_empleado} - ${e.nombre}</option>`
+                  )
+                  .join("")}
+              </select>
+            </div>
+          </div>
 
           <div class="grid-2">
             <div class="form-group">
@@ -1326,19 +1958,19 @@ function renderAdminProcesar() {
             </label>
             <label style="display:flex; align-items:center; gap:8px; font-weight:600; cursor:pointer;">
               <input type="checkbox" id="proc-no-programados" checked />
-              Incluir empleados no programados (generar auditoría aparte)
+              Incluir auditoría de horas no programadas
             </label>
           </div>
 
           <button type="submit" id="btn-submit-procesar" class="btn btn-action btn-block" style="padding:14px; font-size:1rem;">
-            ⚙️ Liquidar Nómina y Generar Reportes Corporativos Excel
+            ⚙️ Validar Horas Extras y Generar Reporte Excel
           </button>
         </form>
       </div>
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📥 Reportes Excel Corporativos Listos (${STATE.reportes.length})</div>
+          <div class="card-title">📥 Reportes Excel Generados (${STATE.reportes.length})</div>
         </div>
         <div class="table-responsive">
           <table>
@@ -1353,7 +1985,7 @@ function renderAdminProcesar() {
             <tbody>
               ${
                 STATE.reportes.length === 0
-                  ? `<tr><td colspan="4" style="text-align:center; padding:24px;">Aún no hay reportes generados.</td></tr>`
+                  ? `<tr><td colspan="4" style="text-align:center; padding:24px;">Aún no hay reportes generados. Puedes generarlos desde el panel izquierdo ahora mismo.</td></tr>`
                   : STATE.reportes
                       .map(
                         (r) => `
@@ -1377,10 +2009,15 @@ function renderAdminProcesar() {
   `;
 }
 
-// --- VISTA 5: ANÁLISIS, GRÁFICAS INTERACTIVAS Y HOJA DE TURNOS IMPRIMIBLE PDF ---
+// ============================================================================
+// 5. ANÁLISIS, AUDITORÍA DE HORAS EXTRAS, GRÁFICAS Y HOJA IMPRIMIBLE PDF
+// ============================================================================
+
 function renderAdminAnalisis() {
   const { kpis, filas, turnos_disponibles } = STATE.analisisData;
   const f = STATE.analisisFiltros;
+  const isSup = STATE.user.role === "supervisor";
+  const canProcessHuellero = ["superadmin", "supervisor", "auditor", "talento_humano"].includes(STATE.user.role);
 
   const kpiCards = [
     { key: "horas_extra", label: "Total Horas Extras", val: Number(kpis.horas_extra || 0).toFixed(2) },
@@ -1390,6 +2027,21 @@ function renderAdminAnalisis() {
   ];
 
   return `
+    ${
+      STATE.user.role === "auditor"
+        ? `
+      <div class="alert-banner alert-ok no-print">
+        <div>
+          <strong>🔍 Panel del Auditor de Horas Extras:</strong> Consulta todos los reportes generados o pulsa <strong>"Generar Nuevo Reporte con Huellero"</strong> si algún área o empleado aún no tiene su reporte hecho.
+        </div>
+        <button type="button" class="btn btn-action btn-sm" data-goto="procesar">
+          ⚙️ Generar Nuevo Reporte con Huellero →
+        </button>
+      </div>
+    `
+        : ""
+    }
+
     <div class="grid-4 no-print" style="margin-bottom:18px;">
       ${kpiCards
         .map(
@@ -1426,36 +2078,52 @@ function renderAdminAnalisis() {
       <div class="card-header">
         <div style="display:flex; gap:10px; flex-wrap:wrap;">
           <button type="button" class="btn ${STATE.analisisTab === "tabla" ? "btn-primary" : "btn-outline"} btn-sm" data-ana-tab="tabla">
-            📋 Tabla Detallada de Novedades
+            📋 Tabla Detallada de Horas Extra y Novedades
           </button>
           <button type="button" class="btn ${STATE.analisisTab === "hoja_imprimible" ? "btn-primary" : "btn-outline"} btn-sm" data-ana-tab="hoja_imprimible">
-            🖨️ Vista Previa Hoja de Turnos (Imprimir / Guardar PDF)
+            🖨️ Vista Previa Hoja de Turnos Individual (PDF / Imprimir)
           </button>
         </div>
-        <button type="button" id="btn-exportar-novedades" class="btn btn-action btn-sm">
-          📊 Exportar Reporte de Novedades (6 Pestañas Excel)
-        </button>
+        <div style="display:flex; gap:8px;">
+          ${
+            canProcessHuellero
+              ? `<button type="button" class="btn btn-outline btn-sm" data-goto="procesar">⚙️ Procesar Huellero</button>`
+              : ""
+          }
+          <button type="button" id="btn-exportar-novedades" class="btn btn-action btn-sm">
+            📊 Exportar Reporte Excel (6 Pestañas)
+          </button>
+        </div>
       </div>
 
       <div class="grid-4" style="align-items:end;">
         <div class="form-group" style="margin-bottom:0;">
-          <label class="form-label">Empleado</label>
+          <label class="form-label">Área</label>
+          ${
+            isSup
+              ? `<input type="text" class="form-control" value="${STATE.user.nombre_area}" disabled />
+                 <input type="hidden" id="ana-area" value="${STATE.user.id_area || ""}" />`
+              : `<select id="ana-area" class="form-control">
+                  <option value="">TODAS LAS ÁREAS</option>
+                  ${STATE.areas
+                    .map(
+                      (a) =>
+                        `<option value="${a.id}" ${String(f.id_area) === String(a.id) ? "selected" : ""}>${a.nombre}</option>`
+                    )
+                    .join("")}
+                </select>`
+          }
+        </div>
+        <div class="form-group" style="margin-bottom:0;">
+          <label class="form-label">Empleado (Individual o Todos)</label>
           <select id="ana-emp" class="form-control">
             <option value="TODOS">TODOS LOS EMPLEADOS</option>
             ${STATE.empleados
+              .filter((e) => !f.id_area || String(e.id_area || "") === String(f.id_area))
               .map(
                 (e) =>
                   `<option value="${e.id_empleado}" ${f.id_empleado === e.id_empleado ? "selected" : ""}>${e.id_empleado} - ${e.nombre}</option>`
               )
-              .join("")}
-          </select>
-        </div>
-        <div class="form-group" style="margin-bottom:0;">
-          <label class="form-label">Turno</label>
-          <select id="ana-turno" class="form-control">
-            <option value="TODOS">TODOS LOS TURNOS</option>
-            ${turnos_disponibles
-              .map((t) => `<option value="${t}" ${f.turno === t ? "selected" : ""}>${t}</option>`)
               .join("")}
           </select>
         </div>
@@ -1491,6 +2159,7 @@ function renderTablaAnalisis(filas) {
             <tr>
               <th>Fecha</th>
               <th>Empleado</th>
+              <th>Área</th>
               <th>Turno</th>
               <th>Ent. Teórica</th>
               <th>Ent. Real</th>
@@ -1505,7 +2174,7 @@ function renderTablaAnalisis(filas) {
           <tbody>
             ${
               filas.length === 0
-                ? `<tr><td colspan="11" style="text-align:center; padding:24px;">No hay registros para los filtros seleccionados.</td></tr>`
+                ? `<tr><td colspan="12" style="text-align:center; padding:24px;">No hay registros liquidados para estos filtros.</td></tr>`
                 : filas
                     .map((row) => {
                       let badgeClass = "badge-ok";
@@ -1516,6 +2185,7 @@ function renderTablaAnalisis(filas) {
                     <tr>
                       <td>${row.fecha}</td>
                       <td><strong>${row.id_empleado}</strong> - ${row.nombre_empleado}</td>
+                      <td><span class="badge badge-info">${row.nombre_area || "Sin Área"}</span></td>
                       <td>${row.turno}</td>
                       <td>${row.hora_entrada_teorica || "—"}</td>
                       <td>${row.hora_entrada_real || "—"}</td>
@@ -1544,7 +2214,8 @@ function renderHojaTurnosImprimible(filas) {
       : STATE.hojaEmpleadoId || STATE.empleados[0]?.id_empleado || "";
   const empObj = STATE.empleados.find((e) => e.id_empleado === empId) || {
     id_empleado: empId,
-    nombre: "SELECCIONE UN EMPLEADO"
+    nombre: "SELECCIONE UN EMPLEADO",
+    nombre_area: ""
   };
   const filasEmp = filas.filter((r) => String(r.id_empleado) === String(empId));
 
@@ -1563,13 +2234,13 @@ function renderHojaTurnosImprimible(filas) {
         <select id="hoja-emp-select" class="form-control" style="width:320px;">
           ${STATE.empleados
             .map(
-              (e) => `<option value="${e.id_empleado}" ${e.id_empleado === empId ? "selected" : ""}>${e.id_empleado} - ${e.nombre}</option>`
+              (e) => `<option value="${e.id_empleado}" ${e.id_empleado === empId ? "selected" : ""}>${e.id_empleado} - ${e.nombre} (${e.nombre_area || ""})</option>`
             )
             .join("")}
         </select>
       </div>
       <button type="button" id="btn-print-sheet" class="btn btn-primary">
-        🖨️ Imprimir / Guardar como PDF
+        🖨️ Imprimir / Guardar Hoja Individual en PDF
       </button>
     </div>
 
@@ -1578,7 +2249,7 @@ function renderHojaTurnosImprimible(filas) {
         <img src="/api/branding/logo" alt="Sterinova" style="max-height:55px;" onerror="this.style.display='none'" />
         <div style="text-align:right;">
           <div style="font-size:1.2rem; font-weight:800; color:#005A66;">HOJA DE TURNOS Y LIQUIDACIÓN DE HORAS</div>
-          <div style="font-size:0.86rem; color:#475569;">Formato Corporativo Sterinova</div>
+          <div style="font-size:0.86rem; color:#475569;">Formato Corporativo Sterinova — Área: ${empObj.nombre_area || "General"}</div>
         </div>
       </div>
 
@@ -1636,7 +2307,6 @@ function renderHojaTurnosImprimible(filas) {
   `;
 }
 
-// --- INICIALIZACIÓN DE GRÁFICAS CHART.JS ---
 function initAnalisisCharts() {
   if (typeof Chart === "undefined") return;
   const filas = STATE.analisisData?.filas || [];
@@ -1645,9 +2315,7 @@ function initAnalisisCharts() {
   const estadosCount = { OK: 0, TARDANZA: 0, AUSENCIA: 0, DESCANSO: 0, OTROS: 0 };
 
   filas.forEach((r) => {
-    for (const k of Object.keys(totals)) {
-      totals[k] += Number(r[k] || 0);
-    }
+    for (const k of Object.keys(totals)) totals[k] += Number(r[k] || 0);
     const est = String(r.estado || "").toUpperCase();
     if (est.includes("AUSENCIA")) estadosCount.AUSENCIA++;
     else if (est.includes("TARDANZA")) estadosCount.TARDANZA++;
@@ -1709,21 +2377,40 @@ function initAnalisisCharts() {
   }
 }
 
-// --- VISTA 6: EMPLEADOS Y SUBIDA DE EXCEL ---
+// ============================================================================
+// 6. BASE DE DATOS DE EMPLEADOS LIGADOS A SU ÁREA (SEPARADA DEL HUELLERO)
+// ============================================================================
+
 function renderAdminEmpleados() {
+  const qEmp = (STATE.searchEmpleados || "").toLowerCase();
+  const empleadosFiltrados = STATE.empleados.filter(
+    (e) =>
+      e.id_empleado.toLowerCase().includes(qEmp) ||
+      e.nombre.toLowerCase().includes(qEmp) ||
+      (e.nombre_area || "").toLowerCase().includes(qEmp) ||
+      (e.cargo || "").toLowerCase().includes(qEmp)
+  );
+
   return `
     <div class="grid-2">
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📥 Subir Excel con los Empleados (Drag & Drop)</div>
+          <div class="card-title">${icon("file-spreadsheet", 18)} <span>Importar Base de Datos de Empleados por Área (Excel)</span></div>
         </div>
-        <div id="emp-dropzone" class="dropzone-box">
-          <div style="font-size:2rem; margin-bottom:6px;">👥</div>
+        <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:10px;">
+          Esta base de empleados es independiente del huellero. Puedes subir un Excel con columnas: <code>ID | Nombre | Área | Cargo | PIN</code> o seleccionar un Área por defecto abajo.
+        </p>
+        <div class="form-group">
+          <label class="form-label">Área por defecto para los empleados del archivo (si el Excel no trae columna Área)</label>
+          <select id="import-emp-area-default" class="form-control">
+            <option value="">-- Detectar columna Área del Excel --</option>
+            ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+          </select>
+        </div>
+        <div id="emp-dropzone" class="dropzone-box" style="padding:18px;">
+          <div style="margin-bottom:6px; color:var(--petroleo);">${icon("upload-cloud", 32)}</div>
           <div style="font-weight:800; color:var(--petroleo);">
-            Arrastra aquí el Excel de Empleados o del Huellero (.xlsx / .xls)
-          </div>
-          <div style="font-size:0.82rem; color:var(--texto-sec); margin-top:4px;">
-            Lee automáticamente ID_Empleado (Columna A) y Nombre (Columna B)
+            Arrastra aquí el Excel de Empleados (.xlsx / .xls) o haz clic para subir
           </div>
           <input type="file" id="import-emp-excel" accept=".xlsx,.xls" style="display:none;" />
         </div>
@@ -1731,16 +2418,23 @@ function renderAdminEmpleados() {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">Registrar / Actualizar Empleado Individual</div>
+          <div class="card-title">${icon("user-plus", 18)} <span>Registrar / Actualizar Empleado y su Área</span></div>
         </div>
         <form id="form-empleado">
-          <div class="grid-2">
+          <div class="grid-3">
             <div class="form-group">
-              <label class="form-label">ID Empleado / Código Biométrico</label>
+              <label class="form-label">ID / Código Biométrico</label>
               <input type="text" id="emp-id" class="form-control" placeholder="Ej: 141 o 00000002" required />
             </div>
             <div class="form-group">
-              <label class="form-label">PIN de Acceso Celular</label>
+              <label class="form-label">Área Asignada</label>
+              <select id="emp-area" class="form-control" required>
+                <option value="">-- Seleccione Área --</option>
+                ${STATE.areas.map((a) => `<option value="${a.id}">${a.nombre}</option>`).join("")}
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">PIN App Móvil</label>
               <input type="text" id="emp-pin" class="form-control" value="1234" required />
             </div>
           </div>
@@ -1750,18 +2444,21 @@ function renderAdminEmpleados() {
               <input type="text" id="emp-nombre" class="form-control" placeholder="Apellidos y Nombres" required />
             </div>
             <div class="form-group">
-              <label class="form-label">Cargo / Área</label>
+              <label class="form-label">Cargo / Puesto</label>
               <input type="text" id="emp-cargo" class="form-control" value="Operario" />
             </div>
           </div>
-          <button type="submit" class="btn btn-primary btn-block">💾 Guardar Empleado</button>
+          <button type="submit" class="btn btn-primary btn-block">${icon("save", 16)} Guardar Empleado en Base de Datos</button>
         </form>
       </div>
     </div>
 
     <div class="card">
       <div class="card-header">
-        <div class="card-title">Directorio de Empleados (${STATE.empleados.length})</div>
+        <div class="card-title">${icon("users", 18)} <span>Directorio Maestro de Empleados (${empleadosFiltrados.length} / ${STATE.empleados.length})</span></div>
+        <div class="search-input-wrap">
+          <input type="text" id="search-empleados-table" class="form-control" placeholder="Buscar por ID, nombre, área o cargo..." value="${STATE.searchEmpleados || ""}" />
+        </div>
       </div>
       <div class="table-responsive" style="max-height:460px;">
         <table>
@@ -1769,26 +2466,28 @@ function renderAdminEmpleados() {
             <tr>
               <th>ID Biométrico</th>
               <th>Nombre Completo</th>
+              <th>Área Asignada</th>
               <th>Cargo</th>
-              <th>PIN App Móvil</th>
+              <th>PIN App</th>
               <th>Acciones</th>
             </tr>
           </thead>
           <tbody>
             ${
-              STATE.empleados.length === 0
-                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay empleados cargados. Arrastra el archivo Excel arriba o registra uno manualmente.</td></tr>`
-                : STATE.empleados
+              empleadosFiltrados.length === 0
+                ? `<tr><td colspan="6" style="text-align:center; padding:22px;">No hay empleados que coincidan con la búsqueda.</td></tr>`
+                : empleadosFiltrados
                     .map(
                       (e) => `
               <tr>
                 <td><strong>${e.id_empleado}</strong></td>
                 <td>${e.nombre}</td>
+                <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
                 <td>${e.cargo || "Operario"}</td>
                 <td><code>${e.pin || "1234"}</code></td>
                 <td>
-                  <button type="button" class="btn btn-outline btn-sm btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-pin="${e.pin || "1234"}">Editar</button>
-                  <button type="button" class="btn btn-danger btn-sm btn-del-emp" data-id="${e.id_empleado}">Eliminar</button>
+                  <button type="button" class="btn btn-outline btn-sm btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-pin="${e.pin || "1234"}" data-area="${e.id_area || ""}">${icon("pencil", 14)} Editar</button>
+                  <button type="button" class="btn btn-danger btn-sm btn-del-emp" data-id="${e.id_empleado}">${icon("trash-2", 14)} Eliminar</button>
                 </td>
               </tr>
             `
@@ -1802,9 +2501,85 @@ function renderAdminEmpleados() {
   `;
 }
 
-// --- VISTA 7: MAPA INTERACTIVO LEAFLET GPS, FOTOS SELFIE Y SOLICITUDES ---
+// ============================================================================
+// 7. MAPA GPS Y PERMISOS (CON AVAL DE SUPERVISOR -> TALENTO HUMANO)
+// ============================================================================
+
 function renderGpsYSolicitudes() {
+  const role = STATE.user.role;
+  const isSup = role === "supervisor";
+  const isRRHH = role === "talento_humano" || role === "superadmin";
+
   return `
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          📝 Solicitudes de Permisos (${isSup ? `Mi Área: ${STATE.user.nombre_area}` : "Todas las Áreas"}) (${STATE.solicitudes.length})
+        </div>
+      </div>
+      <div class="table-responsive" style="max-height:380px;">
+        <table>
+          <thead>
+            <tr>
+              <th>Empleado / Área</th>
+              <th>Tipo / Fechas</th>
+              <th>Motivo</th>
+              <th>Estado del Flujo</th>
+              <th>Acción</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              STATE.solicitudes.length === 0
+                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay solicitudes de permisos registradas.</td></tr>`
+                : STATE.solicitudes
+                    .map((s) => {
+                      let badge = "badge-warn";
+                      if (s.estado === "APROBADA") badge = "badge-ok";
+                      else if (s.estado.includes("RECHAZADA")) badge = "badge-danger";
+                      else if (s.estado === "AVALADO_SUPERVISOR") badge = "badge-info";
+
+                      let accionesHtml = `<small>${s.respuesta_admin || s.respuesta_supervisor || "En trámite"}</small>`;
+                      if (isSup && s.estado === "PENDIENTE_SUPERVISOR") {
+                        accionesHtml = `
+                          <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="AVALADO_SUPERVISOR">
+                            ✔ Avalar y Pasar a Talento Humano
+                          </button>
+                          <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA_SUPERVISOR">
+                            ✖ Rechazar
+                          </button>
+                        `;
+                      } else if (isRRHH && s.estado !== "APROBADA" && !s.estado.includes("RECHAZADA")) {
+                        accionesHtml = `
+                          <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">
+                            ✔ Aprobación Final RRHH
+                          </button>
+                          <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA">
+                            ✖ Rechazar
+                          </button>
+                        `;
+                      }
+
+                      return `
+                  <tr>
+                    <td>
+                      <strong>${s.nombre_empleado}</strong> (ID: ${s.id_empleado})<br/>
+                      <span class="badge badge-info">${s.nombre_area || "Sin Área"}</span>
+                    </td>
+                    <td><strong>${s.tipo}</strong><br/><small>${s.fecha_inicio} a ${s.fecha_fin}</small></td>
+                    <td>${s.motivo}</td>
+                    <td><span class="badge ${badge}">${s.estado}</span></td>
+                    <td>${accionesHtml}</td>
+                  </tr>
+                `;
+                    })
+                    .join("")
+            }
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">
         <div class="card-title">🗺️ Mapa Interactivo en Vivo de Marcaciones GPS (${STATE.marcacionesMoviles.length})</div>
@@ -1816,7 +2591,7 @@ function renderGpsYSolicitudes() {
           <thead>
             <tr>
               <th>Fecha y Hora</th>
-              <th>Empleado</th>
+              <th>Empleado / Área</th>
               <th>Tipo</th>
               <th>Evidencia / Nota</th>
               <th>Dirección Física Detectada</th>
@@ -1833,7 +2608,10 @@ function renderGpsYSolicitudes() {
                       (m) => `
                 <tr>
                   <td><strong>${m.fecha_hora}</strong></td>
-                  <td><strong>${m.nombre_empleado}</strong><br/><small>ID: ${m.id_empleado}</small></td>
+                  <td>
+                    <strong>${m.nombre_empleado}</strong> (ID: ${m.id_empleado})<br/>
+                    <span class="badge badge-info">${m.nombre_area || "Sin Área"}</span>
+                  </td>
                   <td><span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span></td>
                   <td>
                     ${
@@ -1865,61 +2643,6 @@ function renderGpsYSolicitudes() {
         </table>
       </div>
     </div>
-
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">📝 Solicitudes y Permisos de Empleados (${STATE.solicitudes.length})</div>
-      </div>
-      <div class="table-responsive" style="max-height:380px;">
-        <table>
-          <thead>
-            <tr>
-              <th>Empleado</th>
-              <th>Tipo / Fechas</th>
-              <th>Motivo</th>
-              <th>Estado</th>
-              <th>Acción</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${
-              STATE.solicitudes.length === 0
-                ? `<tr><td colspan="5" style="text-align:center; padding:22px;">No hay solicitudes pendientes ni históricas.</td></tr>`
-                : STATE.solicitudes
-                    .map(
-                      (s) => `
-                <tr>
-                  <td><strong>${s.nombre_empleado}</strong><br/><small>ID: ${s.id_empleado}</small></td>
-                  <td><strong>${s.tipo}</strong><br/><small>${s.fecha_inicio} a ${s.fecha_fin}</small></td>
-                  <td>${s.motivo}</td>
-                  <td>
-                    <span class="badge ${
-                      s.estado === "APROBADA"
-                        ? "badge-ok"
-                        : s.estado === "RECHAZADA"
-                        ? "badge-danger"
-                        : "badge-warn"
-                    }">${s.estado}</span>
-                  </td>
-                  <td>
-                    ${
-                      s.estado === "PENDIENTE"
-                        ? `
-                      <button type="button" class="btn btn-primary btn-sm btn-resp-sol" data-id="${s.id}" data-estado="APROBADA">✔ Aprobar</button>
-                      <button type="button" class="btn btn-danger btn-sm btn-resp-sol" data-id="${s.id}" data-estado="RECHAZADA">✖ Rechazar</button>
-                    `
-                        : `<small>${s.respuesta_admin || "Procesada"}</small>`
-                    }
-                  </td>
-                </tr>
-              `
-                    )
-                    .join("")
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>
   `;
 }
 
@@ -1932,7 +2655,6 @@ function initGpsLeafletMap() {
     leafletMapInstance = null;
   }
 
-  // Coordenada inicial por defecto (Bogotá, Colombia)
   let center = [4.6533, -74.0836];
   const validMarks = STATE.marcacionesMoviles.filter((m) => m.latitud != null && m.longitud != null);
   if (validMarks.length > 0) {
@@ -1948,7 +2670,7 @@ function initGpsLeafletMap() {
     const marker = L.marker([Number(m.latitud), Number(m.longitud)]).addTo(leafletMapInstance);
     marker.bindPopup(`
       <div style="font-size:0.84rem;">
-        <strong>${m.nombre_empleado} (ID: ${m.id_empleado})</strong><br/>
+        <strong>${m.nombre_empleado} (${m.nombre_area || ""})</strong><br/>
         <span style="color:#005A66; font-weight:700;">${m.tipo}</span> — ${m.fecha_hora}<br/>
         🏠 ${m.direccion || "Sin dirección"}<br/>
         📍 <code>${m.latitud}, ${m.longitud}</code>
@@ -1958,11 +2680,32 @@ function initGpsLeafletMap() {
 }
 
 // ============================================================================
-// EVENTOS DE GESTIÓN (SUPERADMIN, ADMIN, SUPERVISOR)
+// EVENTOS DE GESTIÓN (TODOS LOS ROLES)
 // ============================================================================
 
 function bindManagementEvents() {
   document.getElementById("btn-toggle-theme")?.addEventListener("click", toggleDarkMode);
+
+  document.getElementById("btn-toggle-notifs")?.addEventListener("click", () => {
+    STATE.showNotifModal = !STATE.showNotifModal;
+    renderApp();
+  });
+
+  document.getElementById("btn-close-notifs")?.addEventListener("click", () => {
+    STATE.showNotifModal = false;
+    renderApp();
+  });
+
+  document.querySelectorAll(".btn-read-notif").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await apiFetch("/api/notificaciones/leer", {
+        method: "POST",
+        body: JSON.stringify({ id: Number(btn.dataset.id) })
+      });
+      await loadNotificaciones(false);
+      renderApp();
+    });
+  });
 
   document.querySelectorAll("[data-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -1991,6 +2734,59 @@ function bindManagementEvents() {
     }
   });
 
+  // --- Eventos Gestión de Áreas (Superadmin) ---
+  const formArea = document.getElementById("form-area");
+  if (formArea) {
+    formArea.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await apiFetch("/api/areas", {
+          method: "POST",
+          body: JSON.stringify({
+            id: document.getElementById("area-id").value || null,
+            nombre: document.getElementById("area-nombre").value,
+            descripcion: document.getElementById("area-desc").value
+          })
+        });
+        showToast("Área guardada correctamente", "success");
+        await Promise.all([loadAreas(), loadUsuarios(), loadEmpleados()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+
+    document.getElementById("btn-limpiar-area")?.addEventListener("click", () => {
+      document.getElementById("area-id").value = "";
+      document.getElementById("area-nombre").value = "";
+      document.getElementById("area-desc").value = "";
+    });
+
+    document.querySelectorAll(".btn-edit-area").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.getElementById("area-id").value = btn.dataset.id;
+        document.getElementById("area-nombre").value = btn.dataset.nombre;
+        document.getElementById("area-desc").value = btn.dataset.desc;
+      });
+    });
+
+    document.querySelectorAll(".btn-del-area").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        try {
+          await apiFetch("/api/areas/eliminar", {
+            method: "POST",
+            body: JSON.stringify({ id: Number(btn.dataset.id) })
+          });
+          showToast("Área eliminada", "info");
+          await Promise.all([loadAreas(), loadUsuarios(), loadEmpleados()]);
+          renderApp();
+        } catch (err) {
+          showToast(err.message, "error");
+        }
+      });
+    });
+  }
+
   // --- Eventos Usuarios del Sistema (Superadmin) ---
   const formUsr = document.getElementById("form-usuario-sistema");
   if (formUsr) {
@@ -2003,11 +2799,12 @@ function bindManagementEvents() {
             username: document.getElementById("usr-username").value,
             nombre: document.getElementById("usr-nombre").value,
             password: document.getElementById("usr-password").value,
-            rol: document.getElementById("usr-rol").value
+            rol: document.getElementById("usr-rol").value,
+            id_area: document.getElementById("usr-area").value || null
           })
         });
         showToast("Usuario guardado correctamente", "success");
-        await loadUsuarios();
+        await Promise.all([loadUsuarios(), loadAreas()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
@@ -2018,7 +2815,8 @@ function bindManagementEvents() {
       document.getElementById("usr-username").value = "";
       document.getElementById("usr-nombre").value = "";
       document.getElementById("usr-password").value = "";
-      document.getElementById("usr-rol").value = "admin";
+      document.getElementById("usr-rol").value = "supervisor";
+      document.getElementById("usr-area").value = "";
     });
 
     document.querySelectorAll(".btn-edit-usr").forEach((btn) => {
@@ -2028,6 +2826,7 @@ function bindManagementEvents() {
         document.getElementById("usr-username").value = u.username;
         document.getElementById("usr-nombre").value = u.nombre;
         document.getElementById("usr-rol").value = u.rol;
+        document.getElementById("usr-area").value = u.id_area || "";
         document.getElementById("usr-password").placeholder = "Nueva contraseña";
       });
     });
@@ -2040,14 +2839,73 @@ function bindManagementEvents() {
             body: JSON.stringify({ username: btn.dataset.user })
           });
           showToast("Usuario eliminado", "info");
-          await loadUsuarios();
+          await Promise.all([loadUsuarios(), loadAreas()]);
           renderApp();
         } catch (err) {
           showToast(err.message, "error");
         }
       });
     });
+
+    document.getElementById("search-usuarios-table")?.addEventListener("input", (e) => {
+      STATE.searchUsuarios = e.target.value;
+      renderApp();
+      const input = document.getElementById("search-usuarios-table");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
   }
+
+  // --- Eventos Talento Humano: Memorandos y Reporte de Permisos ---
+  const formCom = document.getElementById("form-comunicado");
+  if (formCom) {
+    formCom.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        const dtTipo = document.getElementById("com-destino-tipo").value;
+        const rawVal = document.getElementById("com-destino-valor").value;
+        let destino_valor = "";
+        if (dtTipo === "AREA") {
+          destino_valor = rawVal.startsWith("AREA:") ? rawVal.replace("AREA:", "") : rawVal;
+        } else if (dtTipo === "EMPLEADO") {
+          destino_valor = rawVal.startsWith("EMP:") ? rawVal.replace("EMP:", "") : rawVal;
+        }
+        await apiFetch("/api/comunicados", {
+          method: "POST",
+          body: JSON.stringify({
+            tipo: document.getElementById("com-tipo").value,
+            fecha_evento: document.getElementById("com-fecha").value,
+            destino_tipo: dtTipo,
+            destino_valor,
+            titulo: document.getElementById("com-titulo").value,
+            mensaje: document.getElementById("com-mensaje").value,
+            autor: STATE.user.nombre
+          })
+        });
+        showToast("🔔 Memorando enviado y notificado en tiempo real", "success");
+        await Promise.all([loadComunicados(), loadNotificaciones(false)]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  }
+
+  document.getElementById("btn-exportar-permisos")?.addEventListener("click", async () => {
+    try {
+      const res = await apiFetch("/api/exportar-permisos", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      showToast("Reporte Excel de Permisos generado", "success");
+      window.open(res.url, "_blank");
+      await loadReportes();
+    } catch (err) {
+      showToast(err.message, "error");
+    }
+  });
 
   // --- Eventos Catálogo Turnos ---
   const formTurno = document.getElementById("form-turno");
@@ -2061,9 +2919,18 @@ function bindManagementEvents() {
         const hora_salida = document.getElementById("turno-salida").value;
         const tolerancia_min = Number(document.getElementById("turno-tolerancia").value || 0);
         const descanso_min = Number(document.getElementById("turno-descanso").value || 0);
+        const id_area = document.getElementById("turno-area")?.value || null;
         await apiFetch("/api/turnos", {
           method: "POST",
-          body: JSON.stringify({ id: id || null, nombre, hora_entrada, hora_salida, tolerancia_min, descanso_min })
+          body: JSON.stringify({
+            id: id || null,
+            nombre,
+            hora_entrada,
+            hora_salida,
+            tolerancia_min,
+            descanso_min,
+            id_area
+          })
         });
         showToast("Turno guardado correctamente", "success");
         await Promise.all([loadTurnos(), loadDashboard()]);
@@ -2076,7 +2943,6 @@ function bindManagementEvents() {
     document.getElementById("btn-limpiar-turno")?.addEventListener("click", () => {
       document.getElementById("turno-id").value = "";
       document.getElementById("turno-nombre").value = "";
-      document.getElementById("turno-form-title").textContent = "Nuevo Turno / Plantilla de Jornada";
     });
 
     document.querySelectorAll(".btn-edit-turno").forEach((btn) => {
@@ -2089,7 +2955,8 @@ function bindManagementEvents() {
         document.getElementById("turno-salida").value = t.hora_salida;
         document.getElementById("turno-tolerancia").value = t.tolerancia_min;
         document.getElementById("turno-descanso").value = t.descanso_min;
-        document.getElementById("turno-form-title").textContent = `Editando: ${t.nombre}`;
+        const areaEl = document.getElementById("turno-area");
+        if (areaEl && areaEl.tagName === "SELECT") areaEl.value = t.id_area || "";
       });
     });
 
@@ -2116,11 +2983,12 @@ function bindManagementEvents() {
     formFestivo.addEventListener("submit", async (e) => {
       e.preventDefault();
       try {
-        const fecha = document.getElementById("festivo-fecha").value;
-        const descripcion = document.getElementById("festivo-desc").value;
         await apiFetch("/api/festivos", {
           method: "POST",
-          body: JSON.stringify({ fecha, descripcion })
+          body: JSON.stringify({
+            fecha: document.getElementById("festivo-fecha").value,
+            descripcion: document.getElementById("festivo-desc").value
+          })
         });
         showToast("Día festivo guardado", "success");
         await loadFestivos();
@@ -2297,7 +3165,17 @@ function bindManagementEvents() {
     });
   }
 
-  // --- Eventos Procesar Huellero (Drag & Drop + Previsualización) ---
+  // --- Eventos Procesar Huellero (Individual o Agrupado por Área) ---
+  document.getElementById("proc-area")?.addEventListener("change", (e) => {
+    STATE.huelleroFiltroArea = e.target.value;
+    STATE.huelleroFiltroEmpleado = "TODOS";
+    renderApp();
+  });
+
+  document.getElementById("proc-empleado")?.addEventListener("change", (e) => {
+    STATE.huelleroFiltroEmpleado = e.target.value;
+  });
+
   const dropzone = document.getElementById("huellero-dropzone");
   const fileInput = document.getElementById("proc-files");
   if (dropzone && fileInput) {
@@ -2349,9 +3227,11 @@ function bindManagementEvents() {
       const btn = document.getElementById("btn-submit-procesar");
       try {
         btn.disabled = true;
-        btn.textContent = "⏳ Procesando marcaciones y generando reportes Excel...";
+        btn.textContent = "⏳ Validando horas extras y generando reportes...";
         const payload = {
           archivos: STATE.huelleroFiles || [],
+          id_area: document.getElementById("proc-area")?.value || null,
+          id_empleado: document.getElementById("proc-empleado")?.value || "TODOS",
           fecha_inicio: document.getElementById("proc-inicio").value,
           fecha_fin: document.getElementById("proc-fin").value,
           columna_id: document.getElementById("proc-col-id").value,
@@ -2364,13 +3244,13 @@ function bindManagementEvents() {
           method: "POST",
           body: JSON.stringify(payload)
         });
-        showToast(`¡Éxito! ${res.filas_generadas} jornadas calculadas y ${res.reportes.length} archivos Excel listos`, "success");
+        showToast(`¡Listo! ${res.filas_generadas} jornadas validadas y ${res.reportes.length} reportes Excel generados`, "success");
         await Promise.all([loadReportes(), loadDashboard(), loadAnalisis()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
         btn.disabled = false;
-        btn.textContent = "⚙️ Liquidar Nómina y Generar Reportes Corporativos Excel";
+        btn.textContent = "⚙️ Validar Horas Extras y Generar Reporte Excel";
       }
     });
   }
@@ -2402,8 +3282,8 @@ function bindManagementEvents() {
   });
 
   document.getElementById("btn-aplicar-analisis")?.addEventListener("click", async () => {
+    STATE.analisisFiltros.id_area = document.getElementById("ana-area")?.value || "";
     STATE.analisisFiltros.id_empleado = document.getElementById("ana-emp").value;
-    STATE.analisisFiltros.turno = document.getElementById("ana-turno").value;
     STATE.analisisFiltros.fecha_inicio = document.getElementById("ana-inicio").value;
     STATE.analisisFiltros.fecha_fin = document.getElementById("ana-fin").value;
     await loadAnalisis();
@@ -2424,7 +3304,7 @@ function bindManagementEvents() {
     }
   });
 
-  // --- Eventos Empleados (Drag & Drop Excel) ---
+  // --- Eventos Base de Empleados (con Área) ---
   const empDrop = document.getElementById("emp-dropzone");
   const empInput = document.getElementById("import-emp-excel");
   if (empDrop && empInput) {
@@ -2432,12 +3312,13 @@ function bindManagementEvents() {
       if (!file) return;
       try {
         const b64 = await fileToBase64(file);
+        const id_area_default = document.getElementById("import-emp-area-default")?.value || null;
         const res = await apiFetch("/api/empleados/importar-excel", {
           method: "POST",
-          body: JSON.stringify({ filename: file.name, content_base64: b64 })
+          body: JSON.stringify({ filename: file.name, content_base64: b64, id_area_default })
         });
-        showToast(`¡Se importaron ${res.importados} empleados desde el Excel!`, "success");
-        await Promise.all([loadEmpleados(), loadDashboard()]);
+        showToast(`¡Se importaron ${res.importados} empleados en la Base de Datos!`, "success");
+        await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
         if (STATE.empleados.length > 0 && STATE.selectedEmployees.size === 0) {
           STATE.selectedEmployees.add(STATE.empleados[0].id_empleado);
         }
@@ -2471,11 +3352,12 @@ function bindManagementEvents() {
             id_empleado: document.getElementById("emp-id").value,
             nombre: document.getElementById("emp-nombre").value,
             cargo: document.getElementById("emp-cargo").value,
-            pin: document.getElementById("emp-pin").value
+            pin: document.getElementById("emp-pin").value,
+            id_area: document.getElementById("emp-area").value || null
           })
         });
-        showToast("Empleado guardado", "success");
-        await Promise.all([loadEmpleados(), loadDashboard()]);
+        showToast("Empleado guardado con su Área", "success");
+        await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
@@ -2488,6 +3370,7 @@ function bindManagementEvents() {
         document.getElementById("emp-nombre").value = btn.dataset.nombre;
         document.getElementById("emp-cargo").value = btn.dataset.cargo;
         document.getElementById("emp-pin").value = btn.dataset.pin;
+        document.getElementById("emp-area").value = btn.dataset.area || "";
       });
     });
 
@@ -2499,16 +3382,26 @@ function bindManagementEvents() {
             body: JSON.stringify({ id_empleado: btn.dataset.id })
           });
           showToast("Empleado eliminado", "info");
-          await Promise.all([loadEmpleados(), loadDashboard()]);
+          await Promise.all([loadEmpleados(), loadAreas(), loadDashboard()]);
           renderApp();
         } catch (err) {
           showToast(err.message, "error");
         }
       });
     });
+
+    document.getElementById("search-empleados-table")?.addEventListener("input", (e) => {
+      STATE.searchEmpleados = e.target.value;
+      renderApp();
+      const input = document.getElementById("search-empleados-table");
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
   }
 
-  // --- Eventos Responder Solicitudes ---
+  // --- Eventos Responder Solicitudes (Supervisor avala -> Talento Humano aprueba) ---
   document.querySelectorAll(".btn-resp-sol").forEach((btn) => {
     btn.addEventListener("click", async () => {
       try {
@@ -2517,11 +3410,13 @@ function bindManagementEvents() {
           body: JSON.stringify({
             id: Number(btn.dataset.id),
             estado: btn.dataset.estado,
-            respuesta_admin: `Revisado por ${STATE.user.nombre} (${STATE.user.role})`
+            autor_rol: STATE.user.role,
+            autor_nombre: STATE.user.nombre,
+            respuesta_admin: `Gestionado por ${STATE.user.nombre} (${STATE.user.role})`
           })
         });
-        showToast(`Solicitud ${btn.dataset.estado}`, "success");
-        await Promise.all([loadSolicitudes(), loadDashboard()]);
+        showToast(`Solicitud actualizada: ${btn.dataset.estado}`, "success");
+        await Promise.all([loadSolicitudes(), loadDashboard(), loadNotificaciones(false)]);
         renderApp();
       } catch (err) {
         showToast(err.message, "error");
@@ -2531,18 +3426,21 @@ function bindManagementEvents() {
 }
 
 // ============================================================================
-// PORTAL / APP MÓVIL DEL EMPLEADO (CON SELFIE CAMERA + GPS + DIRECCIÓN)
+// PORTAL / APP MÓVIL DEL EMPLEADO (CON BUZÓN DE MEMORANDOS + NOTIFICACIONES)
 // ============================================================================
 
 const EMP_NAV = [
-  { id: "emp_reloj", icon: "⏱️", label: "Reloj GPS & Selfie", short: "Marcar" },
-  { id: "emp_turnos", icon: "🗓️", label: "Mis Turnos", short: "Mis Turnos" },
-  { id: "emp_horas", icon: "💰", label: "Horas Extra y Recargos", short: "Mis Horas" },
-  { id: "emp_permisos", icon: "📝", label: "Solicitar Permiso", short: "Permisos" }
+  { id: "emp_reloj", lucide: "clock", label: "Reloj GPS & Selfie", short: "Marcar" },
+  { id: "emp_comunicados", lucide: "megaphone", label: "Memorandos y Capacitaciones", short: "Memorandos" },
+  { id: "emp_turnos", lucide: "calendar-days", label: "Mis Turnos", short: "Mis Turnos" },
+  { id: "emp_horas", lucide: "coins", label: "Horas Extra y Recargos", short: "Mis Horas" },
+  { id: "emp_permisos", lucide: "file-text", label: "Solicitar Permiso", short: "Permisos" }
 ];
 
 function renderEmpleadoLayout() {
   const currentNav = EMP_NAV.find((n) => n.id === STATE.activeView) || EMP_NAV[0];
+  const r = STATE.empResumen || { comunicados: [] };
+  const memosSinLeer = (r.comunicados || []).filter((c) => !c.leido_por_mi).length;
 
   return `
     <div class="app-shell">
@@ -2554,22 +3452,28 @@ function renderEmpleadoLayout() {
           <div class="avatar-circle">${STATE.user.nombre.charAt(0)}</div>
           <div>
             <div style="font-weight:700; font-size:0.9rem;">${STATE.user.nombre}</div>
-            <div style="font-size:0.75rem; opacity:0.8;">Empleado (ID: ${STATE.user.id})</div>
+            <div style="font-size:0.74rem; opacity:0.85;">ID: ${STATE.user.id} | ${STATE.user.nombre_area || "Área"}</div>
           </div>
         </div>
+        <div class="sidebar-section-label">Portal del Colaborador</div>
         <nav class="sidebar-nav">
           ${EMP_NAV.map(
             (item) => `
             <button type="button" class="nav-btn ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
-              <span>${item.icon}</span>
+              ${icon(item.lucide, 18)}
               <span>${item.label}</span>
+              ${
+                item.id === "emp_comunicados" && memosSinLeer > 0
+                  ? `<span class="nav-step-badge" style="background:#EF4444;">${memosSinLeer} Nuevo</span>`
+                  : ""
+              }
             </button>
           `
           ).join("")}
         </nav>
         <div class="sidebar-footer">
           <button type="button" id="btn-emp-logout" class="btn btn-danger btn-block btn-sm">
-            Cerrar Sesión
+            ${icon("log-out", 15)} Cerrar Sesión
           </button>
         </div>
       </aside>
@@ -2577,19 +3481,26 @@ function renderEmpleadoLayout() {
       <div class="main-area">
         <header class="topbar">
           <div>
-            <div class="topbar-title">${currentNav.icon} ${currentNav.label}</div>
-            <div style="font-size:0.78rem; color:var(--texto-sec);">${STATE.user.nombre} (ID: ${STATE.user.id})</div>
+            <div class="topbar-breadcrumb">PORTAL DEL COLABORADOR / ${STATE.user.nombre_area || "GENERAL"}</div>
+            <div class="topbar-title">${icon(currentNav.lucide, 20)} <span>${currentNav.label}</span></div>
           </div>
           <div style="display:flex; gap:8px; align-items:center;">
-            <button type="button" id="btn-emp-theme" class="btn btn-outline btn-sm">
-              ${STATE.darkMode ? "☀️" : "🌙"}
+            <button type="button" id="btn-emp-notifs" class="btn btn-outline btn-sm">
+              ${icon("bell", 16)} <span id="notif-bell-count" class="badge badge-danger" style="display:${
+                STATE.notificacionesNoLeidas > 0 ? "inline-flex" : "none"
+              };">${STATE.notificacionesNoLeidas}</span>
             </button>
-            <span class="badge badge-info">📱 Empleado</span>
-            <button type="button" id="btn-emp-top-logout" class="btn btn-danger btn-sm">Salir</button>
+            <button type="button" id="btn-emp-theme" class="btn btn-outline btn-sm">
+              ${STATE.darkMode ? icon("sun", 16) : icon("moon", 16)}
+            </button>
+            <button type="button" id="btn-emp-top-logout" class="btn btn-danger btn-sm">
+              ${icon("log-out", 15)} Salir
+            </button>
           </div>
         </header>
 
-        <main class="content-container" style="max-width:860px;">
+        <main class="content-container" style="max-width:880px;">
+          ${renderNotificationsBanner()}
           ${renderEmpleadoViewContent()}
         </main>
       </div>
@@ -2598,7 +3509,7 @@ function renderEmpleadoLayout() {
         ${EMP_NAV.map(
           (item) => `
           <button type="button" class="bottom-nav-item ${STATE.activeView === item.id ? "active" : ""}" data-view="${item.id}">
-            <span class="icon">${item.icon}</span>
+            ${icon(item.lucide, 18)}
             <span>${item.short}</span>
           </button>
         `
@@ -2616,8 +3527,54 @@ function renderEmpleadoViewContent() {
     kpis: { horas_extra: 0, minutos_tardanza: 0, ausencias: 0, llegadas_tempranas: 0 },
     historial: [],
     marcaciones_moviles: [],
-    solicitudes: []
+    solicitudes: [],
+    comunicados: []
   };
+
+  if (STATE.activeView === "emp_comunicados") {
+    return `
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">📢 Mis Memorandos, Citaciones a Capacitación y Comunicados (${r.comunicados.length})</div>
+        </div>
+        ${
+          r.comunicados.length === 0
+            ? `<p style="padding:20px; text-align:center; color:var(--texto-sec);">No tienes memorandos ni citaciones a capacitación en este momento.</p>`
+            : r.comunicados
+                .map(
+                  (c) => `
+            <div class="card" style="border-left:5px solid ${c.leido_por_mi ? "#10B981" : "#E64A19"}; margin-bottom:14px;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+                <span class="badge badge-info">${c.tipo}</span>
+                <small style="color:var(--texto-sec);">Enviado por ${c.autor} — ${c.creado_en}</small>
+              </div>
+              <div style="font-size:1.08rem; font-weight:800; color:var(--petroleo); margin-bottom:6px;">
+                ${c.titulo}
+              </div>
+              ${
+                c.fecha_evento
+                  ? `<div style="font-size:0.88rem; font-weight:700; color:var(--naranja); margin-bottom:8px;">📅 Fecha/Hora Citación: ${c.fecha_evento}</div>`
+                  : ""
+              }
+              <p style="font-size:0.92rem; margin-bottom:12px;">${c.mensaje}</p>
+              <div style="display:flex; justify-content:space-between; align-items:center;">
+                <small style="color:var(--texto-sec);">Alcance: ${c.destino_etiqueta}</small>
+                ${
+                  c.leido_por_mi
+                    ? `<span class="badge badge-ok">✔ Lectura Confirmada</span>`
+                    : `<button type="button" class="btn btn-primary btn-sm btn-confirmar-memo" data-id="${c.id}">
+                        ✋ Confirmar Enterado / Recibido
+                      </button>`
+                }
+              </div>
+            </div>
+          `
+                )
+                .join("")
+        }
+      </div>
+    `;
+  }
 
   if (STATE.activeView === "emp_reloj") {
     const now = new Date();
@@ -2628,11 +3585,27 @@ function renderEmpleadoViewContent() {
       month: "long",
       day: "numeric"
     });
+    const memosSinLeer = (r.comunicados || []).filter((c) => !c.leido_por_mi);
 
     return `
+      ${
+        memosSinLeer.length > 0
+          ? `
+        <div class="alert-banner alert-warning">
+          <div>
+            <strong>📢 Tienes ${memosSinLeer.length} Memorando(s) / Citación a Capacitación sin confirmar:</strong> "${memosSinLeer[0].titulo}"
+          </div>
+          <button type="button" class="btn btn-action btn-sm" data-view="emp_comunicados">
+            Ver Memorando →
+          </button>
+        </div>
+      `
+          : ""
+      }
+
       <div class="clock-widget">
         <div style="font-size:0.85rem; text-transform:uppercase; letter-spacing:1px; opacity:0.85;">
-          Reloj Biométrico Móvil Sterinova
+          Reloj Biométrico Móvil Sterinova — Área: ${r.nombre_area || STATE.user.nombre_area || "General"}
         </div>
         <div class="clock-time" id="live-clock-time">${timeStr}</div>
         <div class="clock-date">${dateStr}</div>
@@ -2644,7 +3617,6 @@ function renderEmpleadoViewContent() {
           }
         </div>
 
-        <!-- Cámara Selfie opcional y nota rápida -->
         <div style="max-width:440px; margin:0 auto 14px;">
           ${
             STATE.selfieBase64
@@ -2674,7 +3646,7 @@ function renderEmpleadoViewContent() {
             type="text"
             id="emp-nota-marcacion"
             class="form-control"
-            placeholder="Nota opcional (ej: Ingreso turno mañana / Visita planta)"
+            placeholder="Nota opcional (ej: Ingreso turno mañana)"
             value="${STATE.notaMarcacion}"
             style="background:rgba(255,255,255,0.92); color:#0F172A; font-size:0.86rem;"
           />
@@ -2880,7 +3852,7 @@ function renderEmpleadoViewContent() {
     return `
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📝 Solicitar Permiso, Cambio de Turno o Reportar Novedad</div>
+          <div class="card-title">📝 Solicitar Permiso o Cambio de Turno (Enviado a Supervisor → Talento Humano)</div>
         </div>
         <form id="form-emp-solicitud">
           <div class="form-group">
@@ -2904,9 +3876,9 @@ function renderEmpleadoViewContent() {
           </div>
           <div class="form-group">
             <label class="form-label">Motivo o Explicación</label>
-            <textarea id="sol-motivo" class="form-control" rows="3" placeholder="Describe brevemente tu solicitud..." required></textarea>
+            <textarea id="sol-motivo" class="form-control" rows="3" placeholder="Describe tu solicitud (la revisará primero tu Supervisor de Área y luego Talento Humano)..." required></textarea>
           </div>
-          <button type="submit" class="btn btn-action btn-block">📨 Enviar Solicitud</button>
+          <button type="submit" class="btn btn-action btn-block">📨 Enviar Solicitud a Mi Supervisor</button>
         </form>
       </div>
 
@@ -2921,7 +3893,7 @@ function renderEmpleadoViewContent() {
                 <th>Tipo</th>
                 <th>Fechas</th>
                 <th>Motivo</th>
-                <th>Estado</th>
+                <th>Estado en el Flujo</th>
               </tr>
             </thead>
             <tbody>
@@ -2939,8 +3911,10 @@ function renderEmpleadoViewContent() {
                       <span class="badge ${
                         s.estado === "APROBADA"
                           ? "badge-ok"
-                          : s.estado === "RECHAZADA"
+                          : s.estado.includes("RECHAZADA")
                           ? "badge-danger"
+                          : s.estado === "AVALADO_SUPERVISOR"
+                          ? "badge-info"
                           : "badge-warn"
                       }">${s.estado}</span>
                     </td>
@@ -2959,6 +3933,43 @@ function renderEmpleadoViewContent() {
 
 function bindEmpleadoEvents() {
   document.getElementById("btn-emp-theme")?.addEventListener("click", toggleDarkMode);
+  document.getElementById("btn-emp-notifs")?.addEventListener("click", () => {
+    STATE.showNotifModal = !STATE.showNotifModal;
+    renderApp();
+  });
+  document.getElementById("btn-close-notifs")?.addEventListener("click", () => {
+    STATE.showNotifModal = false;
+    renderApp();
+  });
+  document.querySelectorAll(".btn-read-notif").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await apiFetch("/api/notificaciones/leer", {
+        method: "POST",
+        body: JSON.stringify({ id: Number(btn.dataset.id) })
+      });
+      await loadNotificaciones(false);
+      renderApp();
+    });
+  });
+
+  document.querySelectorAll(".btn-confirmar-memo").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await apiFetch("/api/comunicados/leer", {
+          method: "POST",
+          body: JSON.stringify({
+            id_comunicado: Number(btn.dataset.id),
+            id_empleado: STATE.user.id
+          })
+        });
+        showToast("✔ Has confirmado la lectura del memorando", "success");
+        await loadEmpleadoResumen();
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
+    });
+  });
 
   document.querySelectorAll("[data-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -2972,7 +3983,6 @@ function bindEmpleadoEvents() {
   document.getElementById("btn-emp-logout")?.addEventListener("click", logout);
   document.getElementById("btn-emp-top-logout")?.addEventListener("click", logout);
 
-  // --- Eventos Cámara Selfie ---
   document.getElementById("btn-toggle-camera")?.addEventListener("click", async () => {
     try {
       const box = document.getElementById("camera-container");
@@ -3067,7 +4077,7 @@ function bindEmpleadoEvents() {
             motivo: document.getElementById("sol-motivo").value
           })
         });
-        showToast("Solicitud enviada correctamente", "success");
+        showToast("Solicitud enviada a tu Supervisor de Área", "success");
         await loadEmpleadoResumen();
         renderApp();
       } catch (err) {
@@ -3087,3 +4097,4 @@ setInterval(() => {
 window.addEventListener("DOMContentLoaded", () => {
   initRoleData();
 });
+

@@ -5,6 +5,7 @@ import math
 from typing import Iterable
 
 
+TOLERANCIA_ENTRADA_ANTICIPADA_MINUTOS = 15
 TOLERANCIA_SALIDA_MINUTOS = 10
 HORA_INICIO_NOCTURNA = 19
 HORA_FIN_NOCTURNA = 6
@@ -132,12 +133,20 @@ def descomponer_recargos(
     else:
         salida_teorica = datetime.combine(entrada_real.date(), salida_hora)
 
-    tolerancia = timedelta(minutes=TOLERANCIA_SALIDA_MINUTOS)
-    # La marcación temprana nunca adelanta el inicio remunerable del turno.
-    entrada_efectiva = max(entrada_real, entrada_teorica)
+    tolerancia_entrada = timedelta(minutes=TOLERANCIA_ENTRADA_ANTICIPADA_MINUTOS)
+    tolerancia_salida = timedelta(minutes=TOLERANCIA_SALIDA_MINUTOS)
+    # Si el empleado ingresa hasta 15 minutos antes de su turno (cortesía de
+    # marcación temprana), el turno inicia a su hora teórica sin generar extra.
+    # Si ingresa más de 15 minutos antes (p. ej. turno 13:00 y entra a las 06:00),
+    # el tramo desde la entrada real hasta la entrada teórica cuenta como extra.
+    entrada_efectiva = (
+        entrada_teorica
+        if entrada_real >= entrada_teorica - tolerancia_entrada
+        else entrada_real
+    )
     salida_efectiva = (
         salida_teorica
-        if salida_real <= salida_teorica + tolerancia
+        if salida_real <= salida_teorica + tolerancia_salida
         else salida_real
     )
 
