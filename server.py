@@ -53,6 +53,15 @@ DB.initialize()
 
 
 def _cargar_ultimo_detalle() -> pd.DataFrame:
+    """Carga el histórico permanente de métricas desde SQLite (nunca se pierde al limpiar Excel)."""
+    try:
+        filas = DB.listar_historico_metricas()
+        if filas:
+            df = pd.DataFrame(filas)
+            df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+            return df
+    except Exception:
+        pass
     ruta = DATA_DIR / "ultimo_detalle.pkl"
     if ruta.is_file():
         try:
@@ -65,9 +74,57 @@ def _cargar_ultimo_detalle() -> pd.DataFrame:
 
 
 def _guardar_ultimo_detalle(df: pd.DataFrame) -> None:
+    """Persiste los cálculos en historico_metricas (SQLite) para que Admin General y Auditor nunca pierdan datos."""
+    if df is None or df.empty:
+        return
+    try:
+        filas_sql = []
+        for _, r in df.iterrows():
+            f_dt = pd.to_datetime(r.get("fecha"), errors="coerce")
+            fecha_str = f_dt.strftime("%Y-%m-%d") if pd.notna(f_dt) else str(r.get("fecha", ""))[:10]
+            ent_teo = pd.to_datetime(r.get("hora_entrada_teorica"), errors="coerce")
+            sal_teo = pd.to_datetime(r.get("hora_salida_teorica"), errors="coerce")
+            ent_real = pd.to_datetime(r.get("hora_entrada_real"), errors="coerce")
+            sal_real = pd.to_datetime(r.get("hora_salida_real"), errors="coerce")
+            filas_sql.append(
+                {
+                    "id_empleado": str(r.get("id_empleado", "")).strip(),
+                    "fecha": fecha_str,
+                    "turno": str(r.get("turno", "") or ""),
+                    "hora_entrada_teorica": ent_teo.strftime("%Y-%m-%d %H:%M") if pd.notna(ent_teo) else str(r.get("hora_entrada_teorica", "") or ""),
+                    "hora_salida_teorica": sal_teo.strftime("%Y-%m-%d %H:%M") if pd.notna(sal_teo) else str(r.get("hora_salida_teorica", "") or ""),
+                    "hora_entrada_real": ent_real.strftime("%Y-%m-%d %H:%M") if pd.notna(ent_real) else str(r.get("hora_entrada_real", "") or ""),
+                    "hora_salida_real": sal_real.strftime("%Y-%m-%d %H:%M") if pd.notna(sal_real) else str(r.get("hora_salida_real", "") or ""),
+                    "horas_trabajadas": float(r.get("horas_trabajadas", 0) or 0),
+                    "horas_extra": float(r.get("horas_extra", 0) or 0),
+                    "ED": float(r.get("ED", 0) or 0),
+                    "EN": float(r.get("EN", 0) or 0),
+                    "EF": float(r.get("EF", 0) or 0),
+                    "END": float(r.get("END", 0) or 0),
+                    "RN": float(r.get("RN", 0) or 0),
+                    "RND": float(r.get("RND", 0) or 0),
+                    "RF": float(r.get("RF", 0) or 0),
+                    "minutos_tardanza": int(r.get("minutos_tardanza", 0) or 0),
+                    "estado": str(r.get("estado", "") or ""),
+                    "observaciones": str(r.get("observaciones", "") or ""),
+                }
+            )
+        DB.guardar_historico_metricas(filas_sql)
+    except Exception:
+        pass
     ruta = DATA_DIR / "ultimo_detalle.pkl"
-    if df is not None and not df.empty:
+    try:
         df.to_pickle(ruta)
+    except Exception:
+        pass
+
+
+def _resumen_directorio(carpeta: Path) -> tuple[int, float]:
+    if not carpeta.is_dir():
+        return 0, 0.0
+    archivos = [f for f in carpeta.iterdir() if f.is_file()]
+    total_bytes = sum(f.stat().st_size for f in archivos)
+    return len(archivos), round(total_bytes / (1024 * 1024), 2)
 
 
 def _combinar_marcaciones_con_moviles(
@@ -305,6 +362,28 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
             if path == "/api/areas":
                 self._json_response({"ok": True, "areas": DB.listar_areas()})
+                return
+
+            if path == "/api/sistema/almacenamiento":
+                db_path = DATA_DIR / "asistencia.db"
+                db_mb = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.is_file() else 0.0
+                rep_count, rep_mb = _resumen_directorio(REPORTS_DIR)
+                upl_count, upl_mb = _resumen_directorio(UPLOADS_DIR)
+                stats_bd = DB.estadisticas_bd()
+                self._json_response(
+                    {
+                        "ok": True,
+                        "db_mb": db_mb,
+                        "reportes_count": rep_count,
+                        "reportes_mb": rep_mb,
+                        "uploads_count": upl_count,
+                        "uploads_mb": upl_mb,
+                        "total_metricas": stats_bd["total_metricas"],
+                        "total_selfies": stats_bd["total_selfies"],
+                        "mb_selfies": stats_bd["mb_selfies"],
+                        "total_notifs_leidas": stats_bd["total_notifs_leidas"],
+                    }
+                )
                 return
 
             if path == "/api/turnos":
@@ -993,15 +1072,20 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         rutas_guardadas.append(dest)
 
                 if rutas_guardadas:
-                    marcaciones, estadisticas = normalizar_lote(
-                        rutas_guardadas,
-                        columna_id=columna_id,
-                        columna_fecha=columna_fecha,
-                        columna_hora=columna_hora,
-                        fecha_inicio=fecha_inicio,
-                        fecha_fin=fecha_fin,
-                        ids_locales=ids_locales,
-                    )
+                    try:
+                        marcaciones, estadisticas = normalizar_lote(
+                            rutas_guardadas,
+                            columna_id=columna_id,
+                            columna_fecha=columna_fecha,
+                            columna_hora=columna_hora,
+                            fecha_inicio=fecha_inicio,
+                            fecha_fin=fecha_fin,
+                            ids_locales=ids_locales,
+                        )
+                    finally:
+                        # Limpieza automática: eliminar Excel temporales del huellero para no llenar disco
+                        for ruta_tmp in rutas_guardadas:
+                            ruta_tmp.unlink(missing_ok=True)
                 else:
                     marcaciones = pd.DataFrame(columns=["id_empleado", "nombre", "fecha", "hora", "fecha_hora"])
                     estadisticas = {
@@ -1052,13 +1136,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         ids_empleados=ids_no_programados,
                     )
 
-                # Combinar con el detalle global persistido para no perder otras áreas
-                detalle_previo = _cargar_ultimo_detalle()
-                if not detalle_previo.empty and not detalle.empty:
-                    procesados_ids = set(detalle["id_empleado"].astype(str).str.strip())
-                    resto = detalle_previo.loc[~detalle_previo["id_empleado"].astype(str).str.strip().isin(procesados_ids)].copy()
-                    _guardar_ultimo_detalle(pd.concat([resto, detalle], ignore_index=True))
-                elif not detalle.empty:
+                # Guardar métricas nuevas en histórico permanente de SQLite (acumula meses sin sobrescribir otras áreas/fechas)
+                if detalle is not None and not detalle.empty:
                     _guardar_ultimo_detalle(detalle)
 
                 mes = date(fecha_inicio.year, fecha_inicio.month, 1)
@@ -1309,6 +1388,37 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 notif_id = int(body.get("id", 0))
                 DB.marcar_notificacion_leida(notif_id)
                 self._json_response({"ok": True})
+                return
+
+            if path == "/api/sistema/limpiar":
+                tipo = str(body.get("tipo", "")).strip()
+                dias = int(body.get("dias", 30))
+                eliminados = 0
+                corte_ts = (datetime.now() - timedelta(days=max(0, dias))).timestamp()
+
+                if tipo == "uploads":
+                    for f in UPLOADS_DIR.iterdir():
+                        if f.is_file():
+                            f.unlink(missing_ok=True)
+                            eliminados += 1
+                elif tipo == "reportes":
+                    for f in REPORTS_DIR.iterdir():
+                        if f.is_file() and (dias <= 0 or f.stat().st_mtime < corte_ts):
+                            f.unlink(missing_ok=True)
+                            eliminados += 1
+                elif tipo == "selfies":
+                    eliminados = DB.limpiar_selfies_antiguas(dias=dias)
+                    DB.compactar_bd()
+                elif tipo == "notificaciones":
+                    eliminados = DB.limpiar_notificaciones_leidas(dias=dias)
+                    DB.compactar_bd()
+                elif tipo == "compactar":
+                    DB.compactar_bd()
+                else:
+                    self._error_response("Tipo de limpieza no válido.")
+                    return
+
+                self._json_response({"ok": True, "tipo": tipo, "eliminados": eliminados})
                 return
 
             self._error_response(f"Ruta POST no encontrada: {path}", 404)

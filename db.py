@@ -123,6 +123,32 @@ class Database:
                 creado_en TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS historico_metricas (
+                id_empleado TEXT NOT NULL,
+                fecha TEXT NOT NULL,
+                turno TEXT DEFAULT '',
+                hora_entrada_teorica TEXT DEFAULT '',
+                hora_salida_teorica TEXT DEFAULT '',
+                hora_entrada_real TEXT DEFAULT '',
+                hora_salida_real TEXT DEFAULT '',
+                horas_trabajadas REAL DEFAULT 0,
+                horas_extra REAL DEFAULT 0,
+                ED REAL DEFAULT 0,
+                EN REAL DEFAULT 0,
+                EF REAL DEFAULT 0,
+                END REAL DEFAULT 0,
+                RN REAL DEFAULT 0,
+                RND REAL DEFAULT 0,
+                RF REAL DEFAULT 0,
+                minutos_tardanza INTEGER DEFAULT 0,
+                estado TEXT DEFAULT '',
+                observaciones TEXT DEFAULT '',
+                actualizado_en TEXT NOT NULL,
+                PRIMARY KEY (id_empleado, fecha)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_historico_fecha ON historico_metricas(fecha);
+
             """
         )
         # Semilla de áreas iniciales si no hay ninguna
@@ -1078,6 +1104,116 @@ class Database:
                    VALUES (?, ?, ?)""",
                 (int(id_comunicado), str(id_empleado).strip(), ahora),
             )
+
+    # --- HISTÓRICO PERMANENTE DE MÉTRICAS (PARA ADMIN GENERAL Y AUDITOR) ---
+    def guardar_historico_metricas(self, filas: list[dict]) -> int:
+        from datetime import datetime
+        if not filas:
+            return 0
+        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        registros = []
+        for f in filas:
+            emp_id = str(f.get("id_empleado", "")).strip()
+            fecha_val = str(f.get("fecha", ""))[:10]
+            if not emp_id or not fecha_val:
+                continue
+            registros.append(
+                (
+                    emp_id,
+                    fecha_val,
+                    str(f.get("turno", "") or ""),
+                    str(f.get("hora_entrada_teorica", "") or ""),
+                    str(f.get("hora_salida_teorica", "") or ""),
+                    str(f.get("hora_entrada_real", "") or ""),
+                    str(f.get("hora_salida_real", "") or ""),
+                    float(f.get("horas_trabajadas", 0) or 0),
+                    float(f.get("horas_extra", 0) or 0),
+                    float(f.get("ED", 0) or 0),
+                    float(f.get("EN", 0) or 0),
+                    float(f.get("EF", 0) or 0),
+                    float(f.get("END", 0) or 0),
+                    float(f.get("RN", 0) or 0),
+                    float(f.get("RND", 0) or 0),
+                    float(f.get("RF", 0) or 0),
+                    int(f.get("minutos_tardanza", 0) or 0),
+                    str(f.get("estado", "") or ""),
+                    str(f.get("observaciones", "") or ""),
+                    ahora,
+                )
+            )
+        with self.connection:
+            self.connection.executemany(
+                """INSERT OR REPLACE INTO historico_metricas (
+                       id_empleado, fecha, turno,
+                       hora_entrada_teorica, hora_salida_teorica,
+                       hora_entrada_real, hora_salida_real,
+                       horas_trabajadas, horas_extra,
+                       ED, EN, EF, END, RN, RND, RF,
+                       minutos_tardanza, estado, observaciones, actualizado_en
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                registros,
+            )
+        return len(registros)
+
+    def listar_historico_metricas(self) -> list[dict]:
+        rows = self.connection.execute(
+            """SELECT id_empleado, fecha, turno,
+                      hora_entrada_teorica, hora_salida_teorica,
+                      hora_entrada_real, hora_salida_real,
+                      horas_trabajadas, horas_extra,
+                      ED, EN, EF, END, RN, RND, RF,
+                      minutos_tardanza, estado, observaciones
+               FROM historico_metricas
+               ORDER BY fecha DESC, id_empleado"""
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # --- ESTADÍSTICAS Y LIMPIEZA SEGURA DE ALMACENAMIENTO ---
+    def estadisticas_bd(self) -> dict:
+        row = self.connection.execute(
+            """SELECT
+                   (SELECT COUNT(*) FROM historico_metricas) AS total_metricas,
+                   (SELECT COUNT(*) FROM marcaciones_moviles WHERE foto_base64 IS NOT NULL AND foto_base64 != '') AS total_selfies,
+                   (SELECT COALESCE(SUM(LENGTH(foto_base64)), 0) FROM marcaciones_moviles WHERE foto_base64 IS NOT NULL AND foto_base64 != '') AS bytes_selfies,
+                   (SELECT COUNT(*) FROM notificaciones WHERE leida = 1) AS total_notifs_leidas"""
+        ).fetchone()
+        return {
+            "total_metricas": int(row["total_metricas"] or 0),
+            "total_selfies": int(row["total_selfies"] or 0),
+            "mb_selfies": round(float(row["bytes_selfies"] or 0) / (1024 * 1024), 2),
+            "total_notifs_leidas": int(row["total_notifs_leidas"] or 0),
+        }
+
+    def limpiar_selfies_antiguas(self, dias: int = 30) -> int:
+        from datetime import datetime, timedelta
+        corte = (datetime.now() - timedelta(days=max(0, int(dias)))).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connection:
+            if dias <= 0:
+                cur = self.connection.execute(
+                    "UPDATE marcaciones_moviles SET foto_base64 = '' WHERE foto_base64 IS NOT NULL AND foto_base64 != ''"
+                )
+            else:
+                cur = self.connection.execute(
+                    "UPDATE marcaciones_moviles SET foto_base64 = '' WHERE foto_base64 IS NOT NULL AND foto_base64 != '' AND fecha_hora < ?",
+                    (corte,),
+                )
+            return int(cur.rowcount or 0)
+
+    def limpiar_notificaciones_leidas(self, dias: int = 30) -> int:
+        from datetime import datetime, timedelta
+        corte = (datetime.now() - timedelta(days=max(0, int(dias)))).strftime("%Y-%m-%d %H:%M:%S")
+        with self.connection:
+            if dias <= 0:
+                cur = self.connection.execute("DELETE FROM notificaciones WHERE leida = 1")
+            else:
+                cur = self.connection.execute(
+                    "DELETE FROM notificaciones WHERE leida = 1 AND creado_en < ?",
+                    (corte,),
+                )
+            return int(cur.rowcount or 0)
+
+    def compactar_bd(self) -> None:
+        self.connection.execute("VACUUM")
 
     def close(self) -> None:
         self.connection.close()

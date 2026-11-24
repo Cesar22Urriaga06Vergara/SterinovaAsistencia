@@ -37,6 +37,7 @@ const STATE = {
   showNotifModal: false,
   // Datos compartidos
   dashboard: null,
+  almacenamiento: null,
   areas: [],
   usuarios: [],
   turnos: [],
@@ -301,6 +302,11 @@ setInterval(() => {
 }, 8000);
 
 async function loadDashboard() { STATE.dashboard = await apiFetch("/api/dashboard"); }
+async function loadAlmacenamiento() {
+  try {
+    STATE.almacenamiento = await apiFetch("/api/sistema/almacenamiento");
+  } catch {}
+}
 async function loadAreas() { const r = await apiFetch("/api/areas"); STATE.areas = r.areas || []; }
 async function loadUsuarios() { const r = await apiFetch("/api/usuarios"); STATE.usuarios = r.usuarios || []; }
 async function loadTurnos() {
@@ -1376,12 +1382,17 @@ function renderSuperadminAreasYUsuarios() {
         <button type="button" class="corp-tab ${tab === "areas" ? "active" : ""}" data-sa-tab="areas">
           ${icon("building-2", 16)} Áreas de la Empresa <span class="corp-tab-count">${STATE.areas.length}</span>
         </button>
+        <button type="button" class="corp-tab ${tab === "almacenamiento" ? "active" : ""}" data-sa-tab="almacenamiento">
+          ${icon("hard-drive", 16)} Almacenamiento y Limpieza
+        </button>
       </div>
       <div style="padding-bottom:8px;">
         ${
           tab === "usuarios"
             ? `<button type="button" class="btn btn-primary btn-sm" id="btn-open-new-usr">${icon("user-plus", 15)} Nuevo Usuario</button>`
-            : `<button type="button" class="btn btn-primary btn-sm" id="btn-open-new-area">${icon("plus", 15)} Nueva Área</button>`
+            : tab === "areas"
+            ? `<button type="button" class="btn btn-primary btn-sm" id="btn-open-new-area">${icon("plus", 15)} Nueva Área</button>`
+            : `<button type="button" class="btn btn-outline btn-sm" id="btn-refresh-storage">${icon("refresh-cw", 15)} Actualizar Uso</button>`
         }
       </div>
     </div>
@@ -1441,7 +1452,8 @@ function renderSuperadminAreasYUsuarios() {
         </div>
       </div>
     `
-        : `
+        : tab === "areas"
+        ? `
       <div class="corp-table-card">
         <div class="table-responsive">
           <table>
@@ -1482,6 +1494,90 @@ function renderSuperadminAreasYUsuarios() {
         </div>
       </div>
     `
+        : (() => {
+            const st = STATE.almacenamiento || {
+              db_mb: 0,
+              reportes_count: 0,
+              reportes_mb: 0,
+              uploads_count: 0,
+              uploads_mb: 0,
+              total_metricas: 0,
+              total_selfies: 0,
+              mb_selfies: 0,
+              total_notifs_leidas: 0
+            };
+            return `
+      <div class="alert-banner alert-ok" style="margin-bottom:16px;">
+        <div>
+          <strong>${icon("shield-check", 16)} Métricas históricas protegidas (${st.total_metricas} registros):</strong>
+          Los Excel del huellero se eliminan automáticamente al procesarse, pero las <strong>métricas de horas extras, tardanzas y ausencias</strong> quedan guardadas permanentemente para el Admin General y el Auditor.
+        </div>
+      </div>
+
+      <div class="corp-table-card">
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Elemento</th>
+                <th>Uso Actual</th>
+                <th>Qué ocurre al limpiar</th>
+                <th style="text-align:right;">Acción Segura</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>Reportes Excel Descargables</strong></td>
+                <td><span class="badge badge-info">${st.reportes_count} archivos · ${st.reportes_mb} MB</span></td>
+                <td style="color:var(--texto-sec);">Borra archivos Excel viejos (pueden regenerarse cuando se necesiten desde las métricas).</td>
+                <td style="text-align:right;">
+                  <div class="row-actions">
+                    <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="reportes" data-clean-dias="30">&gt; 30 días</button>
+                    <button type="button" class="btn btn-danger btn-sm btn-clean-storage" data-clean-tipo="reportes" data-clean-dias="0">Limpiar Todos</button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Temporales del Huellero</strong></td>
+                <td><span class="badge badge-info">${st.uploads_count} archivos · ${st.uploads_mb} MB</span></td>
+                <td style="color:var(--texto-sec);">Se limpian automáticamente al procesar; borra cualquier residuo pendiente.</td>
+                <td style="text-align:right;">
+                  <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="uploads" data-clean-dias="0">Limpiar Ahora</button>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Fotos Selfie de Marcación Móvil</strong></td>
+                <td><span class="badge badge-warn">${st.total_selfies} fotos · ${st.mb_selfies} MB</span></td>
+                <td style="color:var(--texto-sec);">Elimina solo la foto pesada; conserva intacta la hora, dirección física y punto GPS.</td>
+                <td style="text-align:right;">
+                  <div class="row-actions">
+                    <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="selfies" data-clean-dias="60">&gt; 60 días</button>
+                    <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="selfies" data-clean-dias="30">&gt; 30 días</button>
+                  </div>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Notificaciones Leídas</strong></td>
+                <td><span class="badge badge-info">${st.total_notifs_leidas} registros</span></td>
+                <td style="color:var(--texto-sec);">Depura alertas ya leídas antiguas para acelerar el buzón en tiempo real.</td>
+                <td style="text-align:right;">
+                  <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="notificaciones" data-clean-dias="30">&gt; 30 días</button>
+                </td>
+              </tr>
+              <tr>
+                <td><strong>Base de Datos (SQLite)</strong></td>
+                <td><span class="badge badge-ok">${st.db_mb} MB en disco</span></td>
+                <td style="color:var(--texto-sec);">Ejecuta <code>VACUUM</code> para compactar y recuperar espacio físico en disco.</td>
+                <td style="text-align:right;">
+                  <button type="button" class="btn btn-primary btn-sm btn-clean-storage" data-clean-tipo="compactar" data-clean-dias="0">${icon("zap", 14)} Compactar BD</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+          })()
     }
   `;
 }
@@ -3196,11 +3292,43 @@ function bindManagementEvents() {
     if (e.target.id === "drawer-backdrop") closeDrawer();
   });
 
-  // --- Eventos Pestañas y Acciones Superadmin (Áreas y Usuarios) ---
+  // --- Eventos Pestañas y Acciones Superadmin (Áreas, Usuarios y Almacenamiento) ---
   document.querySelectorAll("[data-sa-tab]").forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", async () => {
       STATE.superadminTab = btn.dataset.saTab;
+      if (STATE.superadminTab === "almacenamiento") {
+        await loadAlmacenamiento();
+      }
       renderApp();
+    });
+  });
+
+  document.getElementById("btn-refresh-storage")?.addEventListener("click", async () => {
+    await loadAlmacenamiento();
+    showToast("Estadísticas de almacenamiento actualizadas", "info");
+    renderApp();
+  });
+
+  document.querySelectorAll(".btn-clean-storage").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        const tipo = btn.dataset.cleanTipo;
+        const dias = Number(btn.dataset.cleanDias || 30);
+        const res = await apiFetch("/api/sistema/limpiar", {
+          method: "POST",
+          body: JSON.stringify({ tipo, dias })
+        });
+        showToast(
+          tipo === "compactar"
+            ? "Base de datos compactada correctamente"
+            : `Limpieza completada (${res.eliminados} elementos depurados)`,
+          "success"
+        );
+        await Promise.all([loadAlmacenamiento(), loadReportes()]);
+        renderApp();
+      } catch (err) {
+        showToast(err.message, "error");
+      }
     });
   });
 
