@@ -15,7 +15,7 @@
       huellero de Administrativos o de cualquier Área.
    5) ADMIN GENERAL: Consulta y auditoría ejecutiva global (ve todas las Áreas,
       Supervisores, Empleados, Métricas, Gráficas, Mapa GPS y Reportes).
-   6) EMPLEADO: Reloj GPS con Dirección Física + Coordenadas + Selfie, Buzón de
+   6) EMPLEADO: Reloj GPS con Dirección Física + Coordenadas, Buzón de
       Memorandos/Capacitaciones con confirmación de "Enterado", Mis Turnos,
       Mis Horas Extra y Solicitud de Permisos.
    ========================================================================= */
@@ -26,7 +26,7 @@ const SHIFT_COLORS = [
 ];
 
 const STATE = {
-  user: JSON.parse(localStorage.getItem("sterinova_user") || "null"),
+  user: null,
   darkMode: localStorage.getItem("sterinova_dark") === "true",
   activeView: "dashboard",
   deferredInstallPrompt: null,
@@ -76,11 +76,9 @@ const STATE = {
     fecha_fin: "",
     kpi: ""
   },
-  // Estado Portal Empleado + Cámara Selfie
+  // Estado Portal Empleado
   empResumen: null,
   gpsActual: null,
-  cameraStream: null,
-  selfieBase64: "",
   notaMarcacion: "",
   // Buscadores en tiempo real de tablas
   searchUsuarios: "",
@@ -167,6 +165,44 @@ function showToast(msg, type = "info") {
   setTimeout(() => el.remove(), 4200);
 }
 
+function confirmAction(title, message, confirmLabel = "Sí, eliminar") {
+  return new Promise((resolve) => {
+    const root = document.getElementById("modal-root");
+    if (!root) {
+      resolve(window.confirm(`${title}\n\n${message}`));
+      return;
+    }
+    root.innerHTML = `
+      <div class="modal-backdrop" id="confirm-modal-backdrop">
+        <div class="modal-dialog">
+          <div class="modal-header">
+            <div class="modal-title">${icon("alert-triangle", 18)} <span>${title}</span></div>
+            <button type="button" class="icon-btn" id="btn-confirm-close">${icon("x", 16)}</button>
+          </div>
+          <div class="modal-body">
+            <p style="font-size:0.9rem; color:var(--texto-sec); margin:0; line-height:1.5;">${message}</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline" id="btn-confirm-cancel">Cancelar</button>
+            <button type="button" class="btn btn-danger" id="btn-confirm-ok">${confirmLabel}</button>
+          </div>
+        </div>
+      </div>
+    `;
+    refreshLucideIcons();
+    const cleanup = (val) => {
+      root.innerHTML = "";
+      resolve(val);
+    };
+    document.getElementById("btn-confirm-ok")?.addEventListener("click", () => cleanup(true));
+    document.getElementById("btn-confirm-cancel")?.addEventListener("click", () => cleanup(false));
+    document.getElementById("btn-confirm-close")?.addEventListener("click", () => cleanup(false));
+    document.getElementById("confirm-modal-backdrop")?.addEventListener("click", (e) => {
+      if (e.target.id === "confirm-modal-backdrop") cleanup(false);
+    });
+  });
+}
+
 async function apiFetch(url, options = {}) {
   const res = await fetch(url, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -174,6 +210,9 @@ async function apiFetch(url, options = {}) {
   });
   const data = await res.json();
   if (!res.ok || data.ok === false) {
+    if (res.status === 401 && url !== "/api/login" && STATE.user) {
+      setUser(null);
+    }
     throw new Error(data.error || "Error de comunicación con el servidor");
   }
   return data;
@@ -188,19 +227,10 @@ function fileToBase64(file) {
   });
 }
 
-function stopCameraStream() {
-  if (STATE.cameraStream) {
-    STATE.cameraStream.getTracks().forEach((t) => t.stop());
-    STATE.cameraStream = null;
-  }
-}
-
 function setUser(user) {
-  stopCameraStream();
   STATE.user = user;
   STATE.knownNotifIds.clear();
   if (user) {
-    localStorage.setItem("sterinova_user", JSON.stringify(user));
     if (user.role === "superadmin") STATE.activeView = "areas_usuarios";
     else if (user.role === "admin") STATE.activeView = "dashboard";
     else if (user.role === "supervisor") STATE.activeView = "turnos";
@@ -217,8 +247,18 @@ function setUser(user) {
     }
     initRoleData();
   } else {
-    localStorage.removeItem("sterinova_user");
+    STATE.activeDrawer = null;
+    STATE.drawerData = null;
     renderApp();
+  }
+}
+
+async function logout() {
+  try {
+    await apiFetch("/api/logout", { method: "POST" });
+    setUser(null);
+  } catch (err) {
+    showToast(err.message, "error");
   }
 }
 
@@ -972,8 +1012,8 @@ function renderActiveDrawer() {
                 </select>
               </div>
               <div class="form-group">
-                <label class="form-label">${isEdit ? "Nueva Contraseña" : "Contraseña"}</label>
-                <input type="password" id="usr-password" class="form-control" placeholder="${isEdit ? "Ingrese nueva contraseña" : "Contraseña de acceso"}" required />
+                <label class="form-label">${isEdit ? "Nueva Contraseña (opcional)" : "Contraseña"}</label>
+                <input type="password" id="usr-password" class="form-control" placeholder="${isEdit ? "Dejar vacío para mantener la actual" : "Contraseña de acceso"}" ${isEdit ? "" : "required"} />
               </div>
             </div>
             <div class="drawer-footer">
@@ -1027,7 +1067,8 @@ function renderActiveDrawer() {
                 </div>
                 <div class="form-group">
                   <label class="form-label">PIN App Móvil</label>
-                  <input type="text" id="emp-pin" class="form-control" value="${d.pin || "1234"}" required />
+                  <input type="password" id="emp-pin" class="form-control" autocomplete="new-password"
+                    placeholder="${d.id_empleado ? "Dejar vacío para conservar el PIN" : "Opcional para activar el acceso móvil"}" />
                 </div>
               </div>
             </div>
@@ -1052,7 +1093,7 @@ function renderActiveDrawer() {
           </div>
           <div class="drawer-body">
             <p style="font-size:0.86rem; color:var(--texto-sec); margin-bottom:14px;">
-              Sube un archivo Excel (.xlsx / .xls) con columnas: <code>ID | Nombre | Cargo | PIN</code>${isSup ? ` (todos se asignarán automáticamente a tu área: <strong>${STATE.user.nombre_area}</strong>).` : ` (y opcionalmente <code>Área</code>).`}
+              Sube un archivo Excel (.xlsx / .xls) con columnas en este orden: <code>ID | Nombre | Área | Cargo | PIN</code>. El área, el cargo y el PIN se pueden dejar vacíos.
             </p>
             <div class="form-group">
               <label class="form-label">${isSup ? "Área Asignada (Tu Área)" : "Área por defecto (si el Excel no incluye columna Área)"}</label>
@@ -1502,8 +1543,6 @@ function renderSuperadminAreasYUsuarios() {
               uploads_count: 0,
               uploads_mb: 0,
               total_metricas: 0,
-              total_selfies: 0,
-              mb_selfies: 0,
               total_notifs_leidas: 0
             };
             return `
@@ -1543,17 +1582,6 @@ function renderSuperadminAreasYUsuarios() {
                 <td style="color:var(--texto-sec);">Se limpian automáticamente al procesar; borra cualquier residuo pendiente.</td>
                 <td style="text-align:right;">
                   <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="uploads" data-clean-dias="0">Limpiar Ahora</button>
-                </td>
-              </tr>
-              <tr>
-                <td><strong>Fotos Selfie de Marcación Móvil</strong></td>
-                <td><span class="badge badge-warn">${st.total_selfies} fotos · ${st.mb_selfies} MB</span></td>
-                <td style="color:var(--texto-sec);">Elimina solo la foto pesada; conserva intacta la hora, dirección física y punto GPS.</td>
-                <td style="text-align:right;">
-                  <div class="row-actions">
-                    <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="selfies" data-clean-dias="60">&gt; 60 días</button>
-                    <button type="button" class="btn btn-outline btn-sm btn-clean-storage" data-clean-tipo="selfies" data-clean-dias="30">&gt; 30 días</button>
-                  </div>
                 </td>
               </tr>
               <tr>
@@ -2702,9 +2730,9 @@ function renderAdminAnalisis() {
 
 function renderTablaAnalisis(filas) {
   return `
-    <div class="card">
-      <div class="card-header">
-        <div class="card-title">Detalle de Jornadas, Recargos (ED, EN, EF, END, RN, RND, RF) y Novedades (${filas.length} registros)</div>
+    <div class="corp-table-card">
+      <div style="padding:14px 16px; border-bottom:1px solid var(--borde); font-weight:700; font-size:0.9rem; color:var(--texto);">
+        Detalle de Jornadas, Recargos (ED, EN, EF, END, RN, RND, RF) y Novedades (${filas.length} registros)
       </div>
       <div class="table-responsive" style="max-height:540px;">
         <table>
@@ -2988,14 +3016,13 @@ function renderAdminEmpleados() {
               <th>Nombre Completo</th>
               <th>Área Asignada</th>
               <th>Cargo</th>
-              <th>PIN App</th>
               <th style="width:110px; text-align:right;">Acciones</th>
             </tr>
           </thead>
           <tbody>
             ${
               empleadosFiltrados.length === 0
-                ? `<tr><td colspan="6" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay empleados que coincidan con el filtro.</td></tr>`
+                ? `<tr><td colspan="5" style="text-align:center; padding:28px; color:var(--texto-sec);">No hay empleados que coincidan con el filtro.</td></tr>`
                 : empleadosFiltrados
                     .map(
                       (e) => `
@@ -3004,10 +3031,9 @@ function renderAdminEmpleados() {
                 <td>${e.nombre}</td>
                 <td><span class="badge badge-info">${e.nombre_area || "Sin Área"}</span></td>
                 <td>${e.cargo || "Operario"}</td>
-                <td><code>${e.pin || "1234"}</code></td>
                 <td style="text-align:right;">
                   <div class="row-actions">
-                    <button type="button" class="icon-btn btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-pin="${e.pin || "1234"}" data-area="${e.id_area || ""}" title="Editar empleado">${icon("pencil", 15)}</button>
+                    <button type="button" class="icon-btn btn-edit-emp" data-id="${e.id_empleado}" data-nombre="${e.nombre}" data-cargo="${e.cargo || "Operario"}" data-area="${e.id_area || ""}" title="Editar empleado">${icon("pencil", 15)}</button>
                     <button type="button" class="icon-btn icon-btn-danger btn-del-emp" data-id="${e.id_empleado}" title="Eliminar empleado">${icon("trash-2", 15)}</button>
                   </div>
                 </td>
@@ -3129,7 +3155,7 @@ function renderGpsYSolicitudes() {
                 <th>Fecha y Hora</th>
                 <th>Empleado / Área</th>
                 <th>Tipo</th>
-                <th>Evidencia / Nota</th>
+                <th>Nota</th>
                 <th>Dirección Física</th>
                 <th>Coordenadas</th>
                 <th style="text-align:right;">Mapa</th>
@@ -3150,11 +3176,6 @@ function renderGpsYSolicitudes() {
                     </td>
                     <td><span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span></td>
                     <td>
-                      ${
-                        m.foto_base64
-                          ? `<img src="${m.foto_base64}" alt="Selfie" style="width:40px; height:40px; object-fit:cover; border-radius:8px; border:1px solid var(--borde); display:block; margin-bottom:4px;" />`
-                          : ""
-                      }
                       <small>${m.observaciones || "—"}</small>
                     </td>
                     <td><strong>${m.direccion || "Sin dirección"}</strong></td>
@@ -3259,7 +3280,6 @@ function bindManagementEvents() {
     });
   });
 
-  const logout = () => setUser(null);
   document.getElementById("btn-logout")?.addEventListener("click", logout);
   document.getElementById("btn-top-logout")?.addEventListener("click", logout);
 
@@ -3274,10 +3294,7 @@ function bindManagementEvents() {
 
   // --- Eventos Drawer / Modal Corporativo Global ---
   document.getElementById("btn-open-mobile-menu")?.addEventListener("click", () => openDrawer("mobile_menu", null));
-  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", () => {
-    STATE.activeDrawer = null;
-    setUser(null);
-  });
+  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", logout);
   document.querySelectorAll("[data-mobile-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
       STATE.activeView = btn.dataset.mobileView;
@@ -3311,9 +3328,17 @@ function bindManagementEvents() {
 
   document.querySelectorAll(".btn-clean-storage").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const tipo = btn.dataset.cleanTipo;
+      const dias = Number(btn.dataset.cleanDias || 30);
+      if (tipo !== "compactar") {
+        const ok = await confirmAction(
+          "Confirmar Limpieza Segura",
+          "Esta acción depurará los archivos/registros antiguos seleccionados sin afectar las métricas históricas ni los maestros del sistema.",
+          "Sí, limpiar"
+        );
+        if (!ok) return;
+      }
       try {
-        const tipo = btn.dataset.cleanTipo;
-        const dias = Number(btn.dataset.cleanDias || 30);
         const res = await apiFetch("/api/sistema/limpiar", {
           method: "POST",
           body: JSON.stringify({ tipo, dias })
@@ -3347,6 +3372,8 @@ function bindManagementEvents() {
 
   document.querySelectorAll(".btn-del-area").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const ok = await confirmAction("Eliminar Área", "¿Estás seguro de eliminar esta área? Los empleados asociados quedarán sin área asignada.");
+      if (!ok) return;
       try {
         await apiFetch("/api/areas/eliminar", {
           method: "POST",
@@ -3370,6 +3397,8 @@ function bindManagementEvents() {
 
   document.querySelectorAll(".btn-del-usr").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const ok = await confirmAction("Eliminar Usuario", `¿Deseas eliminar el usuario "${btn.dataset.user}" del sistema?`);
+      if (!ok) return;
       try {
         await apiFetch("/api/usuarios/eliminar", {
           method: "POST",
@@ -3549,6 +3578,8 @@ function bindManagementEvents() {
 
   document.querySelectorAll(".btn-del-turno").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const ok = await confirmAction("Eliminar Turno", "¿Deseas eliminar esta plantilla de turno?");
+      if (!ok) return;
       try {
         await apiFetch("/api/turnos/eliminar", {
           method: "POST",
@@ -3964,7 +3995,6 @@ function bindManagementEvents() {
         id_empleado: btn.dataset.id,
         nombre: btn.dataset.nombre,
         cargo: btn.dataset.cargo,
-        pin: btn.dataset.pin,
         id_area: btn.dataset.area || ""
       });
     });
@@ -3972,6 +4002,8 @@ function bindManagementEvents() {
 
   document.querySelectorAll(".btn-del-emp").forEach((btn) => {
     btn.addEventListener("click", async () => {
+      const ok = await confirmAction("Eliminar Empleado", `¿Deseas eliminar al empleado ID ${btn.dataset.id} de la base de datos?`);
+      if (!ok) return;
       try {
         await apiFetch("/api/empleados/eliminar", {
           method: "POST",
@@ -4079,7 +4111,7 @@ function bindManagementEvents() {
 // ============================================================================
 
 const EMP_NAV = [
-  { id: "emp_reloj", lucide: "clock", label: "Reloj GPS & Selfie", short: "Marcar" },
+  { id: "emp_reloj", lucide: "clock", label: "Reloj GPS", short: "Marcar" },
   { id: "emp_comunicados", lucide: "megaphone", label: "Memorandos y Capacitaciones", short: "Memorandos" },
   { id: "emp_turnos", lucide: "calendar-days", label: "Mis Turnos", short: "Mis Turnos" },
   { id: "emp_horas", lucide: "coins", label: "Horas Extra y Recargos", short: "Mis Horas" },
@@ -4266,39 +4298,20 @@ function renderEmpleadoViewContent() {
         </div>
         <div class="clock-time" id="live-clock-time">${timeStr}</div>
         <div class="clock-date">${dateStr}</div>
-        <div id="gps-status-badge" style="font-size:0.83rem; margin-bottom:14px; opacity:0.95; line-height:1.5;">
+        <div id="gps-status-badge" style="font-size:0.83rem; margin-bottom:10px; opacity:0.95; line-height:1.5;">
           ${
             STATE.gpsActual
               ? `📍 <strong>Coordenadas:</strong> ${STATE.gpsActual.latitud}, ${STATE.gpsActual.longitud} (±${STATE.gpsActual.precision_m}m)<br/>🏠 <strong>Dirección:</strong> ${STATE.gpsActual.direccion || "Calculando..."}`
               : "📍 Obteniendo coordenadas GPS y dirección física..."
           }
         </div>
+        <div style="margin-bottom:12px;">
+          <button type="button" id="btn-refresh-gps" class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.14); color:#fff; border-color:rgba(255,255,255,0.45);">
+            ${icon("locate-fixed", 15)} Actualizar Ubicación GPS
+          </button>
+        </div>
 
         <div style="max-width:440px; margin:0 auto 14px;">
-          ${
-            STATE.selfieBase64
-              ? `
-            <div class="camera-preview-box">
-              <img src="${STATE.selfieBase64}" alt="Selfie capturada" />
-            </div>
-            <button type="button" id="btn-clear-selfie" class="btn btn-outline btn-sm" style="margin-bottom:10px; background:rgba(255,255,255,0.15); color:#fff; border-color:#fff;">
-              🔄 Tomar otra foto
-            </button>
-          `
-              : `
-            <div id="camera-container" class="camera-preview-box" style="display:none;">
-              <video id="camera-video" autoplay playsinline></video>
-            </div>
-            <div style="display:flex; justify-content:center; gap:8px; margin-bottom:10px;">
-              <button type="button" id="btn-toggle-camera" class="btn btn-outline btn-sm" style="background:rgba(255,255,255,0.15); color:#fff; border-color:rgba(255,255,255,0.5);">
-                📷 Activar Cámara Selfie (Opcional)
-              </button>
-              <button type="button" id="btn-snap-selfie" class="btn btn-action btn-sm" style="display:none;">
-                📸 Capturar Foto
-              </button>
-            </div>
-          `
-          }
           <input
             type="text"
             id="emp-nota-marcacion"
@@ -4348,7 +4361,7 @@ function renderEmpleadoViewContent() {
 
       <div class="card">
         <div class="card-header">
-          <div class="card-title">📲 Mis Últimas Marcaciones (Dirección, Coordenadas y Selfie) (${r.marcaciones_moviles.length})</div>
+          <div class="card-title">📲 Mis Últimas Marcaciones (Dirección, Coordenadas) (${r.marcaciones_moviles.length})</div>
         </div>
         <div class="table-responsive">
           <table>
@@ -4356,7 +4369,7 @@ function renderEmpleadoViewContent() {
               <tr>
                 <th>Fecha y Hora</th>
                 <th>Tipo</th>
-                <th>Foto / Nota</th>
+                <th>Nota</th>
                 <th>Dirección Física</th>
                 <th>Coordenadas GPS</th>
               </tr>
@@ -4374,11 +4387,6 @@ function renderEmpleadoViewContent() {
                       <span class="badge ${m.tipo === "ENTRADA" ? "badge-ok" : "badge-warn"}">${m.tipo}</span>
                     </td>
                     <td>
-                      ${
-                        m.foto_base64
-                          ? `<img src="${m.foto_base64}" alt="Selfie" style="width:38px; height:38px; border-radius:6px; object-fit:cover; display:block;" />`
-                          : ""
-                      }
                       <small>${m.observaciones || "—"}</small>
                     </td>
                     <td><strong>${m.direccion || "Sin dirección"}</strong></td>
@@ -4401,9 +4409,9 @@ function renderEmpleadoViewContent() {
 
   if (STATE.activeView === "emp_turnos") {
     return `
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">🗓️ Mi Calendario de Turnos y Descansos Asignados (${r.asignaciones.length})</div>
+      <div class="corp-table-card">
+        <div style="padding:14px 16px; border-bottom:1px solid var(--borde); font-weight:700; font-size:0.9rem;">
+          Mi Calendario de Turnos y Descansos Asignados (${r.asignaciones.length})
         </div>
         <div class="table-responsive">
           <table>
@@ -4462,9 +4470,9 @@ function renderEmpleadoViewContent() {
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-header">
-          <div class="card-title">💰 Historial de Jornadas, Horas Extra y Recargos</div>
+      <div class="corp-table-card">
+        <div style="padding:14px 16px; border-bottom:1px solid var(--borde); font-weight:700; font-size:0.9rem;">
+          Historial de Jornadas, Horas Extra y Recargos (${r.historial.length})
         </div>
         <div class="table-responsive">
           <table>
@@ -4566,6 +4574,11 @@ function renderEmpleadoViewContent() {
 }
 
 function bindEmpleadoEvents() {
+  document.getElementById("btn-refresh-gps")?.addEventListener("click", () => {
+    showToast("Actualizando ubicación GPS...", "info");
+    obtenerUbicacionGPS();
+  });
+
   document.getElementById("btn-emp-theme")?.addEventListener("click", toggleDarkMode);
   document.getElementById("btn-emp-notifs")?.addEventListener("click", () => {
     STATE.showNotifModal = !STATE.showNotifModal;
@@ -4607,54 +4620,13 @@ function bindEmpleadoEvents() {
 
   document.querySelectorAll("[data-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      stopCameraStream();
       STATE.activeView = btn.dataset.view;
       renderApp();
     });
   });
 
-  const logout = () => setUser(null);
   document.getElementById("btn-emp-logout")?.addEventListener("click", logout);
   document.getElementById("btn-emp-top-logout")?.addEventListener("click", logout);
-
-  document.getElementById("btn-toggle-camera")?.addEventListener("click", async () => {
-    try {
-      const box = document.getElementById("camera-container");
-      const video = document.getElementById("camera-video");
-      const snapBtn = document.getElementById("btn-snap-selfie");
-      if (!navigator.mediaDevices?.getUserMedia) {
-        showToast("Tu navegador no permite acceso directo a cámara", "error");
-        return;
-      }
-      STATE.cameraStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: { ideal: 360 }, height: { ideal: 280 } },
-        audio: false
-      });
-      video.srcObject = STATE.cameraStream;
-      box.style.display = "block";
-      snapBtn.style.display = "inline-flex";
-    } catch {
-      showToast("No se pudo acceder a la cámara", "error");
-    }
-  });
-
-  document.getElementById("btn-snap-selfie")?.addEventListener("click", () => {
-    const video = document.getElementById("camera-video");
-    if (!video) return;
-    const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 240;
-    const ctx = canvas.getContext("2d");
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    STATE.selfieBase64 = canvas.toDataURL("image/jpeg", 0.72);
-    stopCameraStream();
-    renderApp();
-  });
-
-  document.getElementById("btn-clear-selfie")?.addEventListener("click", () => {
-    STATE.selfieBase64 = "";
-    renderApp();
-  });
 
   document.querySelectorAll("[data-punch]").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -4675,14 +4647,12 @@ function bindEmpleadoEvents() {
           precision_m: STATE.gpsActual?.precision_m ?? null,
           direccion: STATE.gpsActual?.direccion || "",
           observaciones: nota,
-          foto_base64: STATE.selfieBase64 || "",
           dispositivo: navigator.userAgent.includes("Mobile") ? "App Celular" : "Navegador Web"
         };
         const res = await apiFetch("/api/empleado/marcar", {
           method: "POST",
           body: JSON.stringify(payload)
         });
-        STATE.selfieBase64 = "";
         STATE.notaMarcacion = "";
         showToast(
           `¡${tipo} registrada! ${res.direccion ? `Ubicación: ${res.direccion}` : res.fecha_hora}`,
@@ -4698,13 +4668,9 @@ function bindEmpleadoEvents() {
 
   document.getElementById("btn-open-new-sol")?.addEventListener("click", () => openDrawer("emp_solicitud", null));
   document.getElementById("btn-emp-mobile-menu")?.addEventListener("click", () => openDrawer("mobile_menu", null));
-  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", () => {
-    STATE.activeDrawer = null;
-    setUser(null);
-  });
+  document.getElementById("btn-mobile-drawer-logout")?.addEventListener("click", logout);
   document.querySelectorAll("[data-mobile-view]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      stopCameraStream();
       STATE.activeView = btn.dataset.mobileView;
       STATE.activeDrawer = null;
       renderApp();
@@ -4750,7 +4716,14 @@ setInterval(() => {
   }
 }, 1000);
 
-window.addEventListener("DOMContentLoaded", () => {
-  initRoleData();
+window.addEventListener("DOMContentLoaded", async () => {
+  localStorage.removeItem("sterinova_user");
+  applyTheme();
+  try {
+    const session = await apiFetch("/api/sesion");
+    setUser(session.user);
+  } catch {
+    setUser(null);
+  }
 });
 

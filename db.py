@@ -1,4 +1,7 @@
 import sqlite3
+from hashlib import pbkdf2_hmac
+from hmac import compare_digest
+from secrets import token_bytes
 from pathlib import Path
 from datetime import date
 from typing import Optional
@@ -9,13 +12,42 @@ import shutil
 from models import Asignacion, Turno
 
 
+_SECRET_PREFIX = "pbkdf2_sha256$"
+_SECRET_ITERATIONS = 600_000
+
+
+def _hash_secret(secret: str) -> str:
+    salt = token_bytes(16)
+    digest = pbkdf2_hmac("sha256", secret.encode(), salt, _SECRET_ITERATIONS)
+    return f"{_SECRET_PREFIX}{salt.hex()}${digest.hex()}"
+
+
+def _verify_secret(secret: str, stored: str) -> bool:
+    if not stored or not stored.startswith(_SECRET_PREFIX):
+        return False
+    try:
+        salt_hex, digest_hex = stored[len(_SECRET_PREFIX):].split("$")
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+    except ValueError:
+        return False
+    if len(salt) != 16 or len(expected) != 32:
+        return False
+    digest = pbkdf2_hmac("sha256", secret.encode(), salt, _SECRET_ITERATIONS)
+    return compare_digest(digest, expected)
+
+
 class Database:
     def __init__(self, db_path: Optional[Path] = None) -> None:
         if db_path is None:
             db_path = Path(__file__).resolve().parent / "data" / "asistencia.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.connection = sqlite3.connect(str(db_path), check_same_thread=False, timeout=15.0)
         self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
+        self.connection.execute("PRAGMA busy_timeout=5000")
+        self.connection.execute("PRAGMA foreign_keys=ON")
 
     def initialize(self) -> None:
         self.connection.executescript(
@@ -171,7 +203,7 @@ class Database:
             for row in self.connection.execute("PRAGMA table_info(empleados)").fetchall()
         }
         if "pin" not in columnas_emp:
-            self.connection.execute("ALTER TABLE empleados ADD COLUMN pin TEXT DEFAULT '1234'")
+            self.connection.execute("ALTER TABLE empleados ADD COLUMN pin TEXT")
         if "cargo" not in columnas_emp:
             self.connection.execute("ALTER TABLE empleados ADD COLUMN cargo TEXT DEFAULT 'Operario'")
         if "id_area" not in columnas_emp:
@@ -197,14 +229,6 @@ class Database:
         if "rrhh_usuario" not in columnas_sol:
             self.connection.execute("ALTER TABLE solicitudes_empleado ADD COLUMN rrhh_usuario TEXT DEFAULT ''")
 
-        # Asegurar columna foto_base64 en marcaciones_moviles
-        columnas_marc = {
-            row["name"]
-            for row in self.connection.execute("PRAGMA table_info(marcaciones_moviles)").fetchall()
-        }
-        if "foto_base64" not in columnas_marc:
-            self.connection.execute("ALTER TABLE marcaciones_moviles ADD COLUMN foto_base64 TEXT DEFAULT ''")
-
         # Asegurar columnas rol e id_area en usuarios_admin
         columnas_usr = {
             row["name"]
@@ -229,17 +253,43 @@ class Database:
         sa_pass = os.environ.get("SUPERADMIN_PASS") or env_vars.get("SUPERADMIN_PASS")
         sa_name = os.environ.get("SUPERADMIN_NAME") or env_vars.get("SUPERADMIN_NAME") or "Super Administrador"
 
-        if sa_pass:
-            self.connection.execute(
-                """INSERT INTO usuarios_admin (username, password_hash, nombre, rol)
-                   VALUES (?, ?, ?, 'superadmin')
-                   ON CONFLICT(username) DO UPDATE SET
-                   password_hash=excluded.password_hash,
-                   nombre=excluded.nombre,
-                   rol='superadmin'""",
-                (sa_user.strip(), sa_pass.strip(), sa_name.strip()),
-            )
-        self.connection.commit()
+        with self.connection:
+            self._migrar_credenciales()
+            if sa_pass and sa_pass.strip():
+                current = self.connection.execute(
+                    "SELECT password_hash FROM usuarios_admin WHERE username = ?", (sa_user.strip(),)
+                ).fetchone()
+                password = sa_pass.strip()
+                stored = current["password_hash"] if current else ""
+                if not _verify_secret(password, stored):
+                    stored = _hash_secret(password)
+                self.connection.execute(
+                    """INSERT INTO usuarios_admin (username, password_hash, nombre, rol)
+                       VALUES (?, ?, ?, 'superadmin')
+                       ON CONFLICT(username) DO UPDATE SET
+                       password_hash=excluded.password_hash,
+                       nombre=excluded.nombre,
+                       rol='superadmin'""",
+                    (sa_user.strip(), stored, sa_name.strip()),
+                )
+
+    def _migrar_credenciales(self) -> None:
+        admin_rows = self.connection.execute(
+            "SELECT username, password_hash FROM usuarios_admin WHERE substr(password_hash, 1, ?) != ?",
+            (len(_SECRET_PREFIX), _SECRET_PREFIX),
+        ).fetchall()
+        self.connection.executemany(
+            "UPDATE usuarios_admin SET password_hash = ? WHERE username = ?",
+            [(_hash_secret(row["password_hash"].strip()), row["username"]) for row in admin_rows],
+        )
+        employee_rows = self.connection.execute(
+            "SELECT id_empleado, pin FROM empleados WHERE pin IS NOT NULL AND substr(pin, 1, ?) != ?",
+            (len(_SECRET_PREFIX), _SECRET_PREFIX),
+        ).fetchall()
+        for row in employee_rows:
+            pin = row["pin"].strip()
+            stored = _hash_secret(pin) if pin and pin != "1234" else None
+            self.connection.execute("UPDATE empleados SET pin = ? WHERE id_empleado = ?", (stored, row["id_empleado"]))
 
     def guardar_empleados(self, empleados: list[tuple[str, str]]) -> int:
         unicos = {}
@@ -255,8 +305,8 @@ class Database:
 
         with self.connection:
             self.connection.executemany(
-                """INSERT INTO empleados (id_empleado, nombre)
-                   VALUES (?, ?)
+                """INSERT INTO empleados (id_empleado, nombre, pin)
+                   VALUES (?, ?, NULL)
                    ON CONFLICT(id_empleado) DO UPDATE SET nombre=excluded.nombre""",
                 list(unicos.items()),
             )
@@ -569,14 +619,15 @@ class Database:
             return None
 
         # 1. Buscar en tabla usuarios_admin
-        row = self.connection.execute(
+        rows = self.connection.execute(
             """SELECT u.username, u.nombre, COALESCE(u.rol, 'admin') AS rol,
-                      u.id_area, COALESCE(a.nombre, '') AS nombre_area
+                      u.id_area, COALESCE(a.nombre, '') AS nombre_area, u.password_hash
                FROM usuarios_admin u
                LEFT JOIN areas a ON a.id = u.id_area
-               WHERE lower(u.username) = lower(?) AND u.password_hash = ?""",
-            (ident, pwd),
-        ).fetchone()
+               WHERE lower(u.username) = lower(?)""",
+            (ident,),
+        ).fetchall()
+        row = next((item for item in rows if _verify_secret(pwd, item["password_hash"])), None)
         if row:
             return {
                 "role": str(row["rol"] or "admin").strip().lower(),
@@ -626,7 +677,7 @@ class Database:
                 "SELECT password_hash FROM usuarios_admin WHERE username = ?",
                 (u,),
             ).fetchone()
-            pwd_final = password.strip() if password.strip() else (existente["password_hash"] if existente else "")
+            pwd_final = _hash_secret(password.strip()) if password.strip() else (existente["password_hash"] if existente else "")
             if not pwd_final:
                 raise ValueError("Debe asignar una contraseña al usuario nuevo.")
             self.connection.execute(
@@ -661,7 +712,7 @@ class Database:
         id_limpio = str(id_empleado).strip().lstrip("'")
         rows = self.connection.execute(
             """SELECT e.id_empleado, e.nombre,
-                      COALESCE(e.pin, '1234') AS pin,
+                      e.pin,
                       COALESCE(e.cargo, 'Operario') AS cargo,
                       e.id_area, COALESCE(a.nombre, 'Sin Área Asignada') AS nombre_area
                FROM empleados e
@@ -670,9 +721,7 @@ class Database:
         for row in rows:
             emp_id = str(row["id_empleado"]).strip()
             if emp_id == id_limpio or emp_id.lstrip("0") == id_limpio.lstrip("0"):
-                pin_guardado = str(row["pin"] or "1234").strip()
-                ultimos_4 = emp_id[-4:] if len(emp_id) >= 4 else emp_id
-                if pin.strip() == pin_guardado or (pin_guardado == "1234" and pin.strip() == ultimos_4):
+                if _verify_secret(pin.strip(), row["pin"]):
                     return {
                         "role": "empleado",
                         "id": emp_id,
@@ -685,7 +734,6 @@ class Database:
 
     def listar_empleados_detallado(self, id_area: Optional[int] = None) -> list[dict]:
         query = """SELECT e.id_empleado, e.nombre,
-                          COALESCE(e.pin, '1234') AS pin,
                           COALESCE(e.cargo, 'Operario') AS cargo,
                           e.id_area, COALESCE(a.nombre, 'Sin Área') AS nombre_area
                    FROM empleados e
@@ -703,10 +751,14 @@ class Database:
         id_empleado: str,
         nombre: str,
         cargo: str = "Operario",
-        pin: str = "1234",
+        pin: str = "",
         id_area: Optional[int] = None,
     ) -> None:
         id_limpio = str(id_empleado).strip().lstrip("'")
+        new_pin = pin.strip()
+        if new_pin == "1234":
+            raise ValueError("Asigne un PIN distinto del PIN compartido anterior.")
+        pin_hash = _hash_secret(new_pin) if new_pin else None
         with self.connection:
             self.connection.execute(
                 """INSERT INTO empleados (id_empleado, nombre, cargo, pin, id_area)
@@ -714,13 +766,13 @@ class Database:
                    ON CONFLICT(id_empleado) DO UPDATE SET
                    nombre=excluded.nombre,
                    cargo=excluded.cargo,
-                   pin=excluded.pin,
+                   pin=COALESCE(excluded.pin, empleados.pin),
                    id_area=COALESCE(excluded.id_area, empleados.id_area)""",
                 (
                     id_limpio,
                     nombre.strip(),
                     cargo.strip() or "Operario",
-                    pin.strip() or "1234",
+                    pin_hash,
                     int(id_area) if id_area else None,
                 ),
             )
@@ -763,7 +815,6 @@ class Database:
         direccion: str = "",
         dispositivo: str = "App Móvil / Web",
         observaciones: str = "",
-        foto_base64: str = "",
         fecha_hora: Optional[str] = None,
     ) -> int:
         from datetime import datetime
@@ -771,8 +822,8 @@ class Database:
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO marcaciones_moviles
-                   (id_empleado, fecha_hora, tipo, latitud, longitud, precision_m, direccion, dispositivo, observaciones, foto_base64)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (id_empleado, fecha_hora, tipo, latitud, longitud, precision_m, direccion, dispositivo, observaciones)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     str(id_empleado).strip(),
                     ahora,
@@ -783,7 +834,6 @@ class Database:
                     direccion,
                     dispositivo,
                     observaciones,
-                    foto_base64,
                 ),
             )
             return int(cursor.lastrowid)
@@ -810,7 +860,9 @@ class Database:
             clauses.append("e.id_area = ?")
             params.append(int(id_area))
 
-        query = """SELECT m.*, COALESCE(e.nombre, m.id_empleado) AS nombre_empleado,
+        query = """SELECT m.id, m.id_empleado, m.fecha_hora, m.tipo, m.latitud, m.longitud,
+                          m.precision_m, m.direccion, m.dispositivo, m.observaciones,
+                          COALESCE(e.nombre, m.id_empleado) AS nombre_empleado,
                           e.id_area, COALESCE(a.nombre, 'Sin Área') AS nombre_area
                    FROM marcaciones_moviles m
                    LEFT JOIN empleados e ON e.id_empleado = m.id_empleado
@@ -1173,31 +1225,12 @@ class Database:
         row = self.connection.execute(
             """SELECT
                    (SELECT COUNT(*) FROM historico_metricas) AS total_metricas,
-                   (SELECT COUNT(*) FROM marcaciones_moviles WHERE foto_base64 IS NOT NULL AND foto_base64 != '') AS total_selfies,
-                   (SELECT COALESCE(SUM(LENGTH(foto_base64)), 0) FROM marcaciones_moviles WHERE foto_base64 IS NOT NULL AND foto_base64 != '') AS bytes_selfies,
                    (SELECT COUNT(*) FROM notificaciones WHERE leida = 1) AS total_notifs_leidas"""
         ).fetchone()
         return {
             "total_metricas": int(row["total_metricas"] or 0),
-            "total_selfies": int(row["total_selfies"] or 0),
-            "mb_selfies": round(float(row["bytes_selfies"] or 0) / (1024 * 1024), 2),
             "total_notifs_leidas": int(row["total_notifs_leidas"] or 0),
         }
-
-    def limpiar_selfies_antiguas(self, dias: int = 30) -> int:
-        from datetime import datetime, timedelta
-        corte = (datetime.now() - timedelta(days=max(0, int(dias)))).strftime("%Y-%m-%d %H:%M:%S")
-        with self.connection:
-            if dias <= 0:
-                cur = self.connection.execute(
-                    "UPDATE marcaciones_moviles SET foto_base64 = '' WHERE foto_base64 IS NOT NULL AND foto_base64 != ''"
-                )
-            else:
-                cur = self.connection.execute(
-                    "UPDATE marcaciones_moviles SET foto_base64 = '' WHERE foto_base64 IS NOT NULL AND foto_base64 != '' AND fecha_hora < ?",
-                    (corte,),
-                )
-            return int(cur.rowcount or 0)
 
     def limpiar_notificaciones_leidas(self, dias: int = 30) -> int:
         from datetime import datetime, timedelta

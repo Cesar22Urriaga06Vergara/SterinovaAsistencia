@@ -6,10 +6,14 @@ import io
 import json
 import mimetypes
 import os
+import secrets
 import traceback
 from datetime import date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
+from threading import Lock, RLock
+from time import monotonic
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -44,6 +48,11 @@ DATA_DIR = directorio_datos()
 REPORTS_DIR = DATA_DIR / "reportes_web"
 UPLOADS_DIR = DATA_DIR / "uploads_huellero"
 PUBLIC_DIR = BASE_DIR / "public"
+SESSION_COOKIE = "sterinova_session"
+SESSION_SECONDS = 8 * 60 * 60
+SESSIONS: dict[str, tuple[float, dict[str, Any]]] = {}
+SESSION_LOCK = Lock()
+DB_LOCK = RLock()
 
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -220,18 +229,42 @@ def _obtener_detalle_activo(
     fecha_inicio: date | None = None,
     fecha_fin: date | None = None,
 ) -> pd.DataFrame:
-    """Devuelve el último detalle procesado o calcula uno en vivo con asignaciones + marcaciones móviles."""
+    """Fusiona el histórico permanente de métricas con cualquier marcación móvil reciente sin perder histórico."""
     df = _cargar_ultimo_detalle()
     moviles = DB.listar_marcaciones_moviles(fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
     if df.empty or moviles:
         try:
             marcas = _combinar_marcaciones_con_moviles(pd.DataFrame(), fecha_inicio, fecha_fin)
-            calculado = comparar(DB, marcas, fecha_inicio=fecha_inicio, fecha_fin=fecha_fin)
-            if df.empty:
-                return calculado
-            if not calculado.empty and moviles:
-                # Si hay marcaciones móviles recientes, actualizar esas fechas/empleados
-                return calculado if len(calculado) >= len(df) else df
+            if not marcas.empty:
+                f_min = marcas["fecha"].min().date()
+                f_max = marcas["fecha"].max().date()
+                ids_mov = set(marcas["id_empleado"].astype(str).str.strip())
+                calculado = comparar(
+                    DB,
+                    marcas,
+                    fecha_inicio=fecha_inicio or f_min,
+                    fecha_fin=fecha_fin or f_max,
+                    ids_empleados=ids_mov,
+                )
+                if df.empty:
+                    return calculado
+                if not calculado.empty:
+                    df_copy = df.copy()
+                    calc_copy = calculado.copy()
+                    df_copy["_k"] = (
+                        df_copy["id_empleado"].astype(str).str.strip()
+                        + "|"
+                        + pd.to_datetime(df_copy["fecha"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+                    )
+                    calc_copy["_k"] = (
+                        calc_copy["id_empleado"].astype(str).str.strip()
+                        + "|"
+                        + pd.to_datetime(calc_copy["fecha"], errors="coerce").dt.strftime("%Y-%m-%d").fillna("")
+                    )
+                    keys_calc = set(calc_copy["_k"])
+                    resto = df_copy.loc[~df_copy["_k"].isin(keys_calc)].drop(columns=["_k"])
+                    fusionado = pd.concat([resto, calc_copy.drop(columns=["_k"])], ignore_index=True)
+                    return fusionado
         except Exception:
             pass
     return df
@@ -254,17 +287,62 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
         self._send_cors()
         self.end_headers()
 
-    def _json_response(self, data: Any, status: int = 200) -> None:
+    def _json_response(self, data: Any, status: int = 200, cookie: str | None = None) -> None:
         payload = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
         self.send_response(status)
         self._send_cors()
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        if cookie is not None:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
 
     def _error_response(self, message: str, status: int = 400) -> None:
         self._json_response({"ok": False, "error": message}, status=status)
+
+    def _session_token(self) -> str:
+        try:
+            cookie = SimpleCookie(self.headers.get("Cookie", ""))
+            return cookie[SESSION_COOKIE].value if SESSION_COOKIE in cookie else ""
+        except CookieError:
+            return ""
+
+    def _session_user(self) -> dict[str, Any] | None:
+        token = self._session_token()
+        with SESSION_LOCK:
+            session = SESSIONS.get(token)
+            if session is None:
+                return None
+            expires, user = session
+            if expires <= monotonic():
+                del SESSIONS[token]
+                return None
+            return user
+
+    def _session_cookie(self, token: str, max_age: int) -> str:
+        secure = (
+            os.environ.get("SESSION_COOKIE_SECURE") == "1"
+            or self.headers.get("X-Forwarded-Proto", "").strip().lower() == "https"
+        )
+        cookie = f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
+        return f"{cookie}; Secure" if secure else cookie
+
+    def _require_roles(self, user: dict[str, Any] | None, allowed: tuple[str, ...]) -> bool:
+        if user is None:
+            self._error_response("La sesión no está activa.", 401)
+            return False
+        if user.get("role") not in allowed:
+            self._error_response("No tienes permisos para realizar esta acción.", 403)
+            return False
+        return True
+
+    def _effective_area(self, user: dict[str, Any], requested_area: Any) -> int | None:
+        """Fuerza el área del usuario si es supervisor; otros roles pueden filtrar libremente."""
+        if user.get("role") == "supervisor":
+            return int(user["id_area"]) if user.get("id_area") else None
+        return int(requested_area) if requested_area and str(requested_area).isdigit() else None
 
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0") or "0")
@@ -291,6 +369,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
         self._send_cors()
         self.send_header("Content-Type", mime or "application/octet-stream")
         if download_name:
+            self.send_header("Cache-Control", "no-store")
             self.send_header(
                 "Content-Disposition",
                 f'attachment; filename="{download_name}"',
@@ -305,6 +384,15 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         try:
+            if path.startswith("/api/") and path not in ("/api/branding/logo", "/api/branding/icon"):
+                user = self._session_user()
+                if user is None:
+                    self._error_response("La sesión no está activa.", 401)
+                    return
+                if path == "/api/sesion":
+                    self._json_response({"ok": True, "user": user})
+                    return
+
             # --- Archivos estáticos y recursos ---
             if path == "/api/branding/logo":
                 self._serve_file(DATA_DIR / "logo.png")
@@ -365,11 +453,14 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/sistema/almacenamiento":
-                db_path = DATA_DIR / "asistencia.db"
-                db_mb = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.is_file() else 0.0
-                rep_count, rep_mb = _resumen_directorio(REPORTS_DIR)
-                upl_count, upl_mb = _resumen_directorio(UPLOADS_DIR)
-                stats_bd = DB.estadisticas_bd()
+                if not self._require_roles(user, ("superadmin",)):
+                    return
+                with DB_LOCK:
+                    db_path = DATA_DIR / "asistencia.db"
+                    db_mb = round(db_path.stat().st_size / (1024 * 1024), 2) if db_path.is_file() else 0.0
+                    rep_count, rep_mb = _resumen_directorio(REPORTS_DIR)
+                    upl_count, upl_mb = _resumen_directorio(UPLOADS_DIR)
+                    stats_bd = DB.estadisticas_bd()
                 self._json_response(
                     {
                         "ok": True,
@@ -379,16 +470,15 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         "uploads_count": upl_count,
                         "uploads_mb": upl_mb,
                         "total_metricas": stats_bd["total_metricas"],
-                        "total_selfies": stats_bd["total_selfies"],
-                        "mb_selfies": stats_bd["mb_selfies"],
+                        "total_selfies": stats_bd.get("total_selfies", 0),
+                        "mb_selfies": stats_bd.get("mb_selfies", 0.0),
                         "total_notifs_leidas": stats_bd["total_notifs_leidas"],
                     }
                 )
                 return
 
             if path == "/api/turnos":
-                id_area_q = query.get("id_area", [None])[0]
-                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                id_area = self._effective_area(user, query.get("id_area", [None])[0])
                 turnos = DB.listar_turnos_detallado(id_area=id_area, incluir_globales=True)
                 self._json_response(
                     {
@@ -561,16 +651,18 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
             if path == "/api/marcaciones-moviles":
                 id_empleado = query.get("id_empleado", [None])[0]
-                id_area_q = query.get("id_area", [None])[0]
-                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                if user.get("role") == "empleado":
+                    id_empleado = str(user.get("id", "")).strip()
+                id_area = self._effective_area(user, query.get("id_area", [None])[0])
                 marcaciones = DB.listar_marcaciones_moviles(id_empleado=id_empleado or None, id_area=id_area)
                 self._json_response({"ok": True, "marcaciones": marcaciones})
                 return
 
             if path == "/api/solicitudes":
                 id_empleado = query.get("id_empleado", [None])[0]
-                id_area_q = query.get("id_area", [None])[0]
-                id_area = int(id_area_q) if id_area_q and str(id_area_q).isdigit() else None
+                if user.get("role") == "empleado":
+                    id_empleado = str(user.get("id", "")).strip()
+                id_area = self._effective_area(user, query.get("id_area", [None])[0])
                 solicitudes = DB.listar_solicitudes(id_empleado=id_empleado or None, id_area=id_area)
                 self._json_response({"ok": True, "solicitudes": solicitudes})
                 return
@@ -599,6 +691,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/usuarios":
+                if not self._require_roles(user, ("superadmin", "admin")):
+                    return
                 usuarios = DB.listar_usuarios_sistema()
                 self._json_response({"ok": True, "usuarios": usuarios})
                 return
@@ -627,6 +721,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
 
             if path == "/api/empleado/resumen":
                 id_empleado = query.get("id_empleado", [""])[0].strip()
+                if user.get("role") == "empleado":
+                    id_empleado = str(user.get("id", "")).strip()
                 if not id_empleado:
                     self._error_response("Falta id_empleado")
                     return
@@ -719,6 +815,20 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
 
         try:
+            if path == "/api/logout":
+                with SESSION_LOCK:
+                    SESSIONS.pop(self._session_token(), None)
+                self._json_response({"ok": True}, cookie=self._session_cookie("", 0))
+                return
+
+            session_user = self._session_user()
+            if path != "/api/login" and session_user is None:
+                self._error_response("La sesión no está activa.", 401)
+                return
+
+            if path == "/api/login" and self.headers.get_content_type() != "application/json":
+                self._error_response("El ingreso requiere un cuerpo JSON.", 415)
+                return
             body = self._read_json()
 
             if path == "/api/login":
@@ -732,49 +842,73 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 if not user:
                     self._error_response("Usuario/ID o contraseña/PIN incorrectos.", 401)
                     return
-                self._json_response({"ok": True, "user": user})
+                token = secrets.token_urlsafe(32)
+                now = monotonic()
+                with SESSION_LOCK:
+                    expired = [key for key, (expires, _) in SESSIONS.items() if expires <= now]
+                    for key in expired:
+                        del SESSIONS[key]
+                    SESSIONS.pop(self._session_token(), None)
+                    SESSIONS[token] = (now + SESSION_SECONDS, user)
+                self._json_response(
+                    {"ok": True, "user": user},
+                    cookie=self._session_cookie(token, SESSION_SECONDS),
+                )
                 return
 
             if path == "/api/areas":
+                if not self._require_roles(session_user, ("superadmin",)):
+                    return
                 nombre = str(body.get("nombre", "")).strip()
                 descripcion = str(body.get("descripcion", "")).strip()
                 area_id = int(body["id"]) if body.get("id") else None
-                new_id = DB.guardar_area(nombre, descripcion, area_id=area_id)
+                with DB_LOCK:
+                    new_id = DB.guardar_area(nombre, descripcion, area_id=area_id)
                 self._json_response({"ok": True, "id": new_id})
                 return
 
             if path == "/api/areas/eliminar":
+                if not self._require_roles(session_user, ("superadmin",)):
+                    return
                 area_id = int(body.get("id", 0))
-                DB.eliminar_area(area_id)
+                with DB_LOCK:
+                    DB.eliminar_area(area_id)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/usuarios":
+                if not self._require_roles(session_user, ("superadmin",)):
+                    return
                 username = str(body.get("username", "")).strip()
                 password = str(body.get("password", "")).strip()
                 nombre = str(body.get("nombre", "")).strip()
                 rol = str(body.get("rol", "admin")).strip().lower()
                 id_area_raw = body.get("id_area")
                 id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
-                DB.guardar_usuario_sistema(username, password, nombre, rol, id_area=id_area)
+                with DB_LOCK:
+                    DB.guardar_usuario_sistema(username, password, nombre, rol, id_area=id_area)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/usuarios/eliminar":
+                if not self._require_roles(session_user, ("superadmin",)):
+                    return
                 username = str(body.get("username", "")).strip()
-                DB.eliminar_usuario_sistema(username)
+                with DB_LOCK:
+                    DB.eliminar_usuario_sistema(username)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/turnos":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "talento_humano")):
+                    return
                 nombre = str(body.get("nombre", "")).strip()
                 hora_entrada = str(body.get("hora_entrada", "")).strip()
                 hora_salida = str(body.get("hora_salida", "")).strip()
                 if not nombre or not hora_entrada or not hora_salida:
                     self._error_response("Nombre, hora de entrada y hora de salida son obligatorios.")
                     return
-                id_area_raw = body.get("id_area")
-                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                id_area = self._effective_area(session_user, body.get("id_area"))
                 turno = Turno(
                     id=int(body["id"]) if body.get("id") else None,
                     nombre=nombre,
@@ -786,61 +920,85 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     recargo_nocturno_pct=float(body.get("recargo_nocturno_pct", 0) or 0),
                     activo=bool(body.get("activo", True)),
                 )
-                turno_id = DB.guardar_turno_con_area(turno, id_area=id_area)
+                with DB_LOCK:
+                    turno_id = DB.guardar_turno_con_area(turno, id_area=id_area)
                 self._json_response({"ok": True, "id": turno_id})
                 return
 
             if path == "/api/turnos/eliminar":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "talento_humano")):
+                    return
                 turno_id = int(body.get("id", 0))
-                DB.eliminar_turno(turno_id)
+                with DB_LOCK:
+                    DB.eliminar_turno(turno_id)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/festivos":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano")):
+                    return
                 fecha = date.fromisoformat(str(body.get("fecha", "")).strip())
                 descripcion = str(body.get("descripcion", "")).strip()
-                DB.guardar_dia_festivo(fecha, descripcion)
+                with DB_LOCK:
+                    DB.guardar_dia_festivo(fecha, descripcion)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/festivos/cargar-colombia":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano")):
+                    return
                 anio = int(body.get("anio", date.today().year))
                 dias = festivos_colombia(anio)
-                cantidad = DB.guardar_dias_festivos(dias)
+                with DB_LOCK:
+                    cantidad = DB.guardar_dias_festivos(dias)
                 self._json_response({"ok": True, "cantidad": cantidad, "anio": anio})
                 return
 
             if path == "/api/festivos/eliminar":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano")):
+                    return
                 fecha = date.fromisoformat(str(body.get("fecha", "")).strip())
-                DB.eliminar_dia_festivo(fecha)
+                with DB_LOCK:
+                    DB.eliminar_dia_festivo(fecha)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/empleados":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano", "supervisor")):
+                    return
                 id_emp = str(body.get("id_empleado", "")).strip()
                 nombre = str(body.get("nombre", "")).strip()
                 cargo = str(body.get("cargo", "Operario")).strip()
-                pin = str(body.get("pin", "1234")).strip()
-                id_area_raw = body.get("id_area")
-                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                pin = str(body.get("pin") or "").strip()
+                id_area = self._effective_area(session_user, body.get("id_area"))
                 if not id_emp or not nombre:
                     self._error_response("ID y nombre del empleado son obligatorios.")
                     return
-                DB.guardar_empleado_individual(id_emp, nombre, cargo, pin, id_area=id_area)
+                with DB_LOCK:
+                    DB.guardar_empleado_individual(id_emp, nombre, cargo, pin, id_area=id_area)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/empleados/eliminar":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano", "supervisor")):
+                    return
                 id_emp = str(body.get("id_empleado", "")).strip()
-                DB.eliminar_empleado(id_emp)
+                with DB_LOCK:
+                    if session_user.get("role") == "supervisor":
+                        emps = DB.listar_empleados_detallado(id_area=self._effective_area(session_user, None))
+                        if not any(str(e["id_empleado"]).strip() == id_emp for e in emps):
+                            self._error_response("Solo puedes eliminar empleados de tu propia área.", 403)
+                            return
+                    DB.eliminar_empleado(id_emp)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/empleados/importar-excel":
+                if not self._require_roles(session_user, ("superadmin", "talento_humano", "supervisor")):
+                    return
                 contenido_b64 = str(body.get("content_base64", ""))
                 nombre_archivo = str(body.get("filename", "empleados.xlsx"))
-                id_area_def_raw = body.get("id_area_default")
-                id_area_def = int(id_area_def_raw) if id_area_def_raw and str(id_area_def_raw).isdigit() else None
+                id_area_def = self._effective_area(session_user, body.get("id_area_default"))
                 if not contenido_b64:
                     self._error_response("Seleccione un archivo Excel válido.")
                     return
@@ -852,7 +1010,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     importados = 0
                     libro = pd.read_excel(ruta_tmp, header=None, dtype=object)
                     for _, row in libro.iterrows():
-                        if len(row) < 2 or pd.isna(row.iloc[0]) or pd.notna(row.iloc[2]) and str(row.iloc[0]).strip().lower() in ("id", "id_empleado", "codigo"):
+                        if len(row) < 2 or pd.isna(row.iloc[0]):
                             continue
                         c0 = str(row.iloc[0]).strip().lstrip("'")
                         c1 = str(row.iloc[1]).strip() if pd.notna(row.iloc[1]) else ""
@@ -861,7 +1019,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                         # Si es archivo de huellero (col 2 es fecha), o si es base maestra (col 2 es Area, col 3 Cargo, col 4 PIN)
                         area_row = id_area_def
                         cargo_row = "Operario"
-                        pin_row = "1234"
+                        pin_row = ""
                         if len(row) >= 3 and pd.notna(row.iloc[2]):
                             val2 = str(row.iloc[2]).strip()
                             # Si val2 coincide con un área o no parece fecha, usarlo como Área
@@ -876,6 +1034,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                                 cargo_row = val3
                         if len(row) >= 5 and pd.notna(row.iloc[4]):
                             pin_row = str(row.iloc[4]).strip()
+                            if pin_row == "1234":
+                                pin_row = ""
                         if c1:
                             DB.guardar_empleado_individual(c0, c1, cargo_row, pin_row, id_area=area_row)
                             importados += 1
@@ -896,6 +1056,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/asignaciones/masivas":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "talento_humano")):
+                    return
                 empleados = [str(e).strip() for e in body.get("empleados", []) if str(e).strip()]
                 fechas = [date.fromisoformat(str(f).strip()) for f in body.get("fechas", []) if str(f).strip()]
                 es_descanso = bool(body.get("es_descanso", False))
@@ -926,6 +1088,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/asignaciones/patron":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "talento_humano")):
+                    return
                 empleados = [str(e).strip() for e in body.get("empleados", []) if str(e).strip()]
                 inicio = date.fromisoformat(str(body.get("fecha_inicio", "")).strip())
                 fin = date.fromisoformat(str(body.get("fecha_fin", "")).strip())
@@ -960,6 +1124,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/asignaciones/eliminar":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "talento_humano")):
+                    return
                 empleados = [str(e).strip() for e in body.get("empleados", []) if str(e).strip()]
                 fechas = [date.fromisoformat(str(f).strip()) for f in body.get("fechas", []) if str(f).strip()]
                 eliminadas = 0
@@ -1035,6 +1201,8 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/procesar-huellero":
+                if not self._require_roles(session_user, ("superadmin", "supervisor", "auditor", "talento_humano")):
+                    return
                 archivos_payload = body.get("archivos", [])
                 fecha_inicio = date.fromisoformat(str(body.get("fecha_inicio", "")).strip())
                 fecha_fin = date.fromisoformat(str(body.get("fecha_fin", "")).strip())
@@ -1044,8 +1212,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 turnos_seleccionados = body.get("turnos", [])
                 incluir_no_programados = bool(body.get("incluir_no_programados", False))
                 incluir_marcaciones_app = bool(body.get("incluir_marcaciones_app", True))
-                id_area_raw = body.get("id_area")
-                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                id_area = self._effective_area(session_user, body.get("id_area"))
                 id_empleado_ind = str(body.get("id_empleado", "")).strip()
 
                 if fecha_inicio > fecha_fin:
@@ -1250,7 +1417,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/empleado/marcar":
-                id_empleado = str(body.get("id_empleado", "")).strip()
+                id_empleado = str(session_user.get("id") if session_user.get("role") == "empleado" else body.get("id_empleado", "")).strip()
                 tipo = str(body.get("tipo", "ENTRADA")).strip().upper()
                 latitud = body.get("latitud")
                 longitud = body.get("longitud")
@@ -1258,7 +1425,6 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 direccion = str(body.get("direccion", "")).strip()
                 dispositivo = str(body.get("dispositivo", "App Celular")).strip()
                 observaciones = str(body.get("observaciones", "")).strip()
-                foto_base64 = str(body.get("foto_base64", "")).strip()
 
                 if not id_empleado:
                     self._error_response("ID de empleado requerido.")
@@ -1291,7 +1457,6 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                     direccion=direccion,
                     dispositivo=dispositivo,
                     observaciones=observaciones,
-                    foto_base64=foto_base64,
                 )
                 self._json_response(
                     {
@@ -1306,7 +1471,7 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/empleado/solicitud":
-                id_empleado = str(body.get("id_empleado", "")).strip()
+                id_empleado = str(session_user.get("id") if session_user.get("role") == "empleado" else body.get("id_empleado", "")).strip()
                 tipo = str(body.get("tipo", "PERMISO")).strip()
                 fecha_inicio = str(body.get("fecha_inicio", "")).strip()
                 fecha_fin = str(body.get("fecha_fin", "")).strip() or fecha_inicio
@@ -1319,18 +1484,25 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/solicitudes/responder":
+                if not self._require_roles(session_user, ("supervisor", "talento_humano", "superadmin")):
+                    return
                 sol_id = int(body.get("id", 0))
                 estado = str(body.get("estado", "APROBADA")).strip()
                 respuesta = str(body.get("respuesta_admin", "")).strip()
-                autor_rol = str(body.get("autor_rol", "supervisor")).strip()
-                autor_nombre = str(body.get("autor_nombre", "")).strip()
-                DB.responder_solicitud(sol_id, estado, respuesta, autor_rol=autor_rol, autor_nombre=autor_nombre)
+                autor_rol = str(session_user.get("role", "supervisor")).strip()
+                autor_nombre = str(session_user.get("nombre", "")).strip()
+                if autor_rol == "supervisor" and estado not in ("AVALADO_SUPERVISOR", "RECHAZADA_SUPERVISOR"):
+                    self._error_response("El supervisor solo puede avalar o rechazar en primera instancia.", 403)
+                    return
+                with DB_LOCK:
+                    DB.responder_solicitud(sol_id, estado, respuesta, autor_rol=autor_rol, autor_nombre=autor_nombre)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/exportar-permisos":
-                id_area_raw = body.get("id_area")
-                id_area = int(id_area_raw) if id_area_raw and str(id_area_raw).isdigit() else None
+                if not self._require_roles(session_user, ("talento_humano", "superadmin", "admin")):
+                    return
+                id_area = self._effective_area(session_user, body.get("id_area"))
                 solicitudes = DB.listar_solicitudes(id_area=id_area)
                 if not solicitudes:
                     self._error_response("No hay solicitudes de permisos para exportar.")
@@ -1355,67 +1527,76 @@ class NominaAPIHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/comunicados":
+                if not self._require_roles(session_user, ("talento_humano", "superadmin")):
+                    return
                 titulo = str(body.get("titulo", "")).strip()
                 tipo = str(body.get("tipo", "MEMORANDO")).strip()
                 mensaje = str(body.get("mensaje", "")).strip()
                 destino_tipo = str(body.get("destino_tipo", "TODOS")).strip()
                 destino_valor = str(body.get("destino_valor", "")).strip()
                 fecha_evento = str(body.get("fecha_evento", "")).strip()
-                autor = str(body.get("autor", "Talento Humano")).strip()
+                autor = str(session_user.get("nombre") or "Talento Humano").strip()
                 if not titulo or not mensaje:
                     self._error_response("El título y el mensaje del comunicado son obligatorios.")
                     return
-                com_id = DB.crear_comunicado(
-                    titulo=titulo,
-                    tipo=tipo,
-                    mensaje=mensaje,
-                    destino_tipo=destino_tipo,
-                    destino_valor=destino_valor,
-                    fecha_evento=fecha_evento,
-                    autor=autor,
-                )
+                with DB_LOCK:
+                    com_id = DB.crear_comunicado(
+                        titulo=titulo,
+                        tipo=tipo,
+                        mensaje=mensaje,
+                        destino_tipo=destino_tipo,
+                        destino_valor=destino_valor,
+                        fecha_evento=fecha_evento,
+                        autor=autor,
+                    )
                 self._json_response({"ok": True, "id": com_id})
                 return
 
             if path == "/api/comunicados/leer":
                 id_comunicado = int(body.get("id_comunicado", 0))
-                id_empleado = str(body.get("id_empleado", "")).strip()
-                DB.confirmar_lectura_comunicado(id_comunicado, id_empleado)
+                id_empleado = str(session_user.get("id") if session_user.get("role") == "empleado" else body.get("id_empleado", "")).strip()
+                with DB_LOCK:
+                    DB.confirmar_lectura_comunicado(id_comunicado, id_empleado)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/notificaciones/leer":
                 notif_id = int(body.get("id", 0))
-                DB.marcar_notificacion_leida(notif_id)
+                with DB_LOCK:
+                    DB.marcar_notificacion_leida(notif_id)
                 self._json_response({"ok": True})
                 return
 
             if path == "/api/sistema/limpiar":
+                if not self._require_roles(session_user, ("superadmin",)):
+                    return
                 tipo = str(body.get("tipo", "")).strip()
                 dias = int(body.get("dias", 30))
                 eliminados = 0
                 corte_ts = (datetime.now() - timedelta(days=max(0, dias))).timestamp()
 
-                if tipo == "uploads":
-                    for f in UPLOADS_DIR.iterdir():
-                        if f.is_file():
-                            f.unlink(missing_ok=True)
-                            eliminados += 1
-                elif tipo == "reportes":
-                    for f in REPORTS_DIR.iterdir():
-                        if f.is_file() and (dias <= 0 or f.stat().st_mtime < corte_ts):
-                            f.unlink(missing_ok=True)
-                            eliminados += 1
-                elif tipo == "selfies":
-                    eliminados = DB.limpiar_selfies_antiguas(dias=dias)
-                    DB.compactar_bd()
-                elif tipo == "notificaciones":
-                    eliminados = DB.limpiar_notificaciones_leidas(dias=dias)
-                    DB.compactar_bd()
-                elif tipo == "compactar":
-                    DB.compactar_bd()
-                else:
-                    self._error_response("Tipo de limpieza no válido.")
+                with DB_LOCK:
+                    if tipo == "uploads":
+                        for f in UPLOADS_DIR.iterdir():
+                            if f.is_file():
+                                f.unlink(missing_ok=True)
+                                eliminados += 1
+                    elif tipo == "reportes":
+                        for f in REPORTS_DIR.iterdir():
+                            if f.is_file() and (dias <= 0 or f.stat().st_mtime < corte_ts):
+                                f.unlink(missing_ok=True)
+                                eliminados += 1
+                    elif tipo == "selfies":
+                        eliminados = DB.limpiar_selfies_antiguas(dias=dias)
+                        DB.compactar_bd()
+                    elif tipo == "notificaciones":
+                        eliminados = DB.limpiar_notificaciones_leidas(dias=dias)
+                        DB.compactar_bd()
+                    elif tipo == "compactar":
+                        DB.compactar_bd()
+                    else:
+                        self._error_response("Tipo de limpieza no válido.")
+                        return
                     return
 
                 self._json_response({"ok": True, "tipo": tipo, "eliminados": eliminados})
