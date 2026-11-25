@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 PETROLEO = "#005A66"
 NARANJA = "#E64A19"
@@ -13,9 +16,17 @@ def directorio_aplicacion() -> Path:
 
 
 def directorio_datos() -> Path:
-    return directorio_aplicacion() / "data"
+    configurado = os.getenv("ASISTENCIA_DATA_DIR")
+    return Path(configurado).expanduser().resolve() if configurado else directorio_aplicacion() / "data"
 
 
 def recurso_data(nombre: str) -> Path:
-    return directorio_datos() / nombre
+    return directorio_aplicacion() / "data" / nombre
+
+
+ZONA_BOGOTA = ZoneInfo("America/Bogota")
+
+
+def ahora_bogota() -> datetime:
+    return datetime.now(ZONA_BOGOTA)
 

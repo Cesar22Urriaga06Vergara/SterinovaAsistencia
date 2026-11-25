@@ -162,7 +162,7 @@ def comparar(
         if fecha_inicio is not None:
             marcas = marcas.loc[marcas["fecha"] >= pd.Timestamp(fecha_inicio)]
         if fecha_fin is not None:
-            marcas = marcas.loc[marcas["fecha"] <= pd.Timestamp(fecha_fin)]
+            marcas = marcas.loc[marcas["fecha"] <= pd.Timestamp(fecha_fin + timedelta(days=1))]
     else:
         marcas = pd.DataFrame(
             {
@@ -266,7 +266,8 @@ def comparar(
             fecha_marca = pd.Timestamp(marca.fecha).date()
             empleado_marca = str(marca.id_empleado).strip()
             if (
-                (empleado_marca, fecha_marca) in claves_asignadas
+                (fecha_fin is not None and fecha_marca > fecha_fin)
+                or (empleado_marca, fecha_marca) in claves_asignadas
                 or (empleado_marca, fecha_marca) in claves_salida_turno_nocturno
             ):
                 continue

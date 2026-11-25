@@ -34,7 +34,7 @@ def filtrar_detalle(
     fecha_inicio: date | None = None,
     fecha_fin: date | None = None,
     id_empleado: str | None = None,
-    turno: str | None = None,
+    turno: str | list[str] | None = None,
 ) -> pd.DataFrame:
     """Aplica filtros al detalle persistido sin volver a calcular marcaciones."""
     if detalle is None or detalle.empty:
@@ -51,7 +51,7 @@ def filtrar_detalle(
     if id_empleado is not None:
         mascara &= detalle["id_empleado"].astype(str).str.strip().eq(str(id_empleado).strip())
     if turno is not None:
-        mascara &= detalle["turno"].astype(str).eq(str(turno))
+        mascara &= detalle["turno"].astype(str).isin([turno] if isinstance(turno, str) else turno)
     return detalle.loc[mascara].copy()
 
 

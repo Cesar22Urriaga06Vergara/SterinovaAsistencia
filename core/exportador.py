@@ -580,7 +580,15 @@ def _escribir_detalle_periodo(
     fecha_fin: date | None,
 ) -> int:
     inicio, fin = _resolver_periodo(mes, fecha_inicio, fecha_fin)
-    hoja.title = _nombre_hoja(nombre_empleado)
+    base = _nombre_hoja(nombre_empleado)
+    ocupados = {otra.title.casefold() for otra in hoja.parent.worksheets if otra is not hoja}
+    titulo = base
+    indice = 2
+    while titulo.casefold() in ocupados:
+        sufijo = f" {indice}"
+        titulo = base[:31 - len(sufijo)] + sufijo
+        indice += 1
+    hoja.title = titulo
     hoja["E1"] = _titulo_periodo(inicio, fin)
     hoja["C7"] = str(nombre_empleado).strip()
     hoja["A42"] = "TOTAL DE HORAS EXTRAS"
@@ -743,6 +751,7 @@ def generar_hojas_turnos(
     salida: str | None = None,
     fecha_inicio: date | None = None,
     fecha_fin: date | None = None,
+    sufijo_archivo: str = "",
 ) -> list[str]:
     if detalle is None or detalle.empty:
         return []
@@ -768,7 +777,6 @@ def generar_hojas_turnos(
 
     workbook = load_workbook(plantilla)
     plantilla_hoja = workbook[workbook.sheetnames[0]]
-    plantilla_hoja.title = _nombre_hoja(str(seleccionados[0][1]))
     rangos_unmerges = {str(valor) for valor in plantilla_hoja.merged_cells.ranges}
     for fila in range(9, 40):
         rango = f"G{fila}:H{fila}"
@@ -787,7 +795,8 @@ def generar_hojas_turnos(
             fecha_fin,
         )
 
-    ruta = salida_dir / f"Horas_Por_Empleado_{inicio:%Y%m%d}_{fin:%Y%m%d}.xlsx"
+    sufijo = f"_{sufijo_archivo}" if sufijo_archivo else ""
+    ruta = salida_dir / f"Horas_Por_Empleado_{inicio:%Y%m%d}_{fin:%Y%m%d}{sufijo}.xlsx"
     workbook.save(ruta)
     workbook.close()
     _incrustar_logo_xlsx(ruta)

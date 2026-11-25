@@ -1011,7 +1011,7 @@ tr:hover td {
   border: 1px solid #CBD5E1;
 }
 
-/* --- CLOCK & SELFIE --- */
+/* --- CLOCK --- */
 .clock-widget {
   background: linear-gradient(135deg, #06252B 0%, #005A66 100%);
   color: #FFFFFF;
@@ -1063,22 +1063,6 @@ tr:hover td {
   font-weight: 700;
   border: none;
   cursor: pointer;
-}
-
-.camera-preview-box {
-  max-width: 260px;
-  margin: 10px auto 14px;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  background: rgba(0, 0, 0, 0.25);
-}
-
-.camera-preview-box video, .camera-preview-box img {
-  width: 100%;
-  display: block;
-  max-height: 200px;
-  object-fit: cover;
 }
 
 /* --- ALERTS & BADGES --- */
@@ -1527,3 +1511,22 @@ tr:hover td {
   .login-card .form-group { margin-bottom: 12px; }
   .login-input-group .form-control { height: 42px; }
 }
+
+.corte-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: .75rem;
+  margin-block: .75rem;
+}
+
+.corte-form label {
+  display: grid;
+  gap: .25rem;
+  max-width: 100%;
+}
+
+.corte-seccion { margin-block-start: 1rem; }
+.corte-areas { padding-inline-start: 1.25rem; }
+.corte-areas li { margin-block: .5rem; }
+.corte-check { display: block; overflow-wrap: anywhere; }

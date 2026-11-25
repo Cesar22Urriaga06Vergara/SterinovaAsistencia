@@ -1,0 +1,10 @@
+.env
+.env.*
+.git
+__pycache__/
+**/__pycache__/
+data/*.db
+data/*.db-*
+data/*.pkl
+data/uploads_huellero/
+data/reportes_web/

@@ -1,12 +1,23 @@
 services:
   - type: web
-    name: sterinova-asistencia
+    name: sterinova-asistencia-piloto
     runtime: python
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /salud
+    disk:
+      name: asistencia-piloto
+      mountPath: /var/data
+      sizeGB: 1
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     envVars:
+      - key: ASISTENCIA_DATA_DIR
+        value: /var/data
       - key: PORT
         value: 8000
+      - key: SESSION_COOKIE_SECURE
+        value: "1"
       - key: SUPERADMIN_USER
         sync: false
       - key: SUPERADMIN_PASS

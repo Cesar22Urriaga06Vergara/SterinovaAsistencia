@@ -37,6 +37,7 @@ def normalizar_lote(
     fecha_inicio=None,
     fecha_fin=None,
     ids_locales: set[str] | None = None,
+    incluir_dia_siguiente: bool = False,
 ) -> tuple[pd.DataFrame, dict[str, int | list[str]]]:
     """Normaliza libros uno a uno y conserva solo dos marcas por persona/día.
 
@@ -75,8 +76,13 @@ def normalizar_lote(
             filtrado = filtrado.loc[fechas >= pd.Timestamp(fecha_inicio)].copy()
         if fecha_fin is not None:
             fechas = pd.to_datetime(filtrado["fecha"], errors="coerce").dt.normalize()
-            filtrado = filtrado.loc[fechas <= pd.Timestamp(fecha_fin)].copy()
-        cantidad_periodo += len(filtrado)
+            limite = pd.Timestamp(fecha_fin)
+            cantidad_periodo += int((fechas <= limite).sum())
+            if incluir_dia_siguiente:
+                limite = limite + pd.DateOffset(days=1)
+            filtrado = filtrado.loc[fechas <= limite].copy()
+        else:
+            cantidad_periodo += len(filtrado)
         if filtrado.empty:
             continue
 

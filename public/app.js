@@ -7,7 +7,7 @@
       asigna turnos en Calendario/Gantt, valida horas extras con el Huellero,
       genera reportes Individuales o Agrupados de sus empleados y avala permisos.
    3) AUDITOR DE HORAS EXTRAS: Ve todos los reportes y métricas de horas extras
-      de todas las áreas y también puede procesar el Huellero y generar reportes
+      de todas las áreas y puede dejar observaciones y exportar resultados
       individuales o por área si aún no están hechos.
    4) TALENTO HUMANO (RRHH): Gestión y aprobación final de permisos, exportación
       de Reporte Excel de Permisos, envío de Memorandos/Capacitaciones con
@@ -24,6 +24,14 @@ const SHIFT_COLORS = [
   "#0284C7", "#7C3AED", "#0D9488", "#D97706", "#DC2626",
   "#2563EB", "#9333EA", "#059669", "#EA580C", "#4F46E5"
 ];
+
+const ZONA_NOMINA = "America/Bogota";
+const fechaBogota = new Intl.DateTimeFormat("sv-SE", {
+  timeZone: ZONA_NOMINA, year: "numeric", month: "2-digit", day: "2-digit"
+});
+const horaBogota = new Intl.DateTimeFormat("es-CO", {
+  timeZone: ZONA_NOMINA, hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
+});
 
 const STATE = {
   user: null,
@@ -49,7 +57,7 @@ const STATE = {
   comunicados: [],
   marcacionesMoviles: [],
   // Asignación de Turnos
-  calMonth: new Date().toISOString().slice(0, 7),
+  calMonth: fechaBogota.format().slice(0, 7),
   asignacionModoVista: "calendario",
   selectedEmployees: new Set(),
   selectedDates: new Set(),
@@ -71,7 +79,7 @@ const STATE = {
   analisisFiltros: {
     id_area: "",
     id_empleado: "TODOS",
-    turno: "TODOS",
+    turnos: [],
     fecha_inicio: "",
     fecha_fin: "",
     kpi: ""
@@ -233,7 +241,7 @@ function setUser(user) {
   if (user) {
     if (user.role === "superadmin") STATE.activeView = "areas_usuarios";
     else if (user.role === "admin") STATE.activeView = "dashboard";
-    else if (user.role === "supervisor") STATE.activeView = "turnos";
+    else if (user.role === "supervisor") STATE.activeView = "empleados";
     else if (user.role === "auditor") STATE.activeView = "analisis";
     else if (user.role === "talento_humano") STATE.activeView = "rrhh_comunicados";
     else STATE.activeView = "emp_reloj";
@@ -391,7 +399,7 @@ async function loadAnalisis() {
   const effectiveArea = getEffectiveAreaId() || f.id_area;
   if (effectiveArea && effectiveArea !== "TODAS") params.set("id_area", String(effectiveArea));
   if (f.id_empleado && f.id_empleado !== "TODOS") params.set("id_empleado", f.id_empleado);
-  if (f.turno && f.turno !== "TODOS") params.set("turno", f.turno);
+  f.turnos.forEach((turno) => params.append("turno", turno));
   if (f.fecha_inicio) params.set("fecha_inicio", f.fecha_inicio);
   if (f.fecha_fin) params.set("fecha_fin", f.fecha_fin);
   if (f.kpi) params.set("kpi", f.kpi);
@@ -676,11 +684,12 @@ function bindLoginEvents() {
 // ============================================================================
 
 function getMenuForRole(role) {
+  const corte = { id: "cortes", lucide: "calendar-check", label: "Cortes de nómina", step: "NÓMINA", short: "Cortes" };
   if (role === "superadmin") {
     return [
       { id: "areas_usuarios", lucide: "shield-check", label: "Áreas y Usuarios", step: "CONFIG", short: "Áreas/Roles" },
       { id: "empleados", lucide: "users", label: "Base de Empleados", step: "MAESTRO", short: "Empleados" },
-      { id: "festivos", lucide: "calendar-days", label: "Días Festivos", step: "CALENDARIO", short: "Festivos" }
+      { id: "festivos", lucide: "calendar-days", label: "Días Festivos", step: "CALENDARIO", short: "Festivos" }, corte
     ];
   }
 
@@ -690,7 +699,8 @@ function getMenuForRole(role) {
       { id: "turnos", lucide: "clock", label: "Turnos de Mi Área", step: "PASO 1", short: "Turnos" },
       { id: "asignacion", lucide: "calendar-range", label: "Asignar Turnos & Gantt", step: "PASO 2", short: "Asignar" },
       { id: "procesar", lucide: "file-spreadsheet", label: "Validar Huellero y Reportes", step: "PASO 3", short: "Huellero" },
-      { id: "analisis", lucide: "bar-chart-3", label: "Horas Extra y Hoja PDF", step: "PASO 4", short: "Horas Extra" },
+      { id: "analisis", lucide: "bar-chart-3", label: "Novedades y Hoja PDF", step: "PASO 4", short: "Novedades" },
+      corte,
       { id: "gps_solicitudes", lucide: "map-pin", label: "Permisos y Mapa GPS", step: "PERMISOS", short: "Permisos/GPS" }
     ];
   }
@@ -698,7 +708,7 @@ function getMenuForRole(role) {
   if (role === "auditor") {
     return [
       { id: "analisis", lucide: "file-check-2", label: "Auditoría de Horas Extras", step: "CONTROL", short: "Auditoría" },
-      { id: "procesar", lucide: "file-spreadsheet", label: "Generar Reportes / Huellero", step: "LIQUIDAR", short: "Sacar Reporte" },
+      corte,
       { id: "asignacion", lucide: "calendar-range", label: "Consulta Matriz Gantt", step: "TURNOS", short: "Gantt" },
       { id: "gps_solicitudes", lucide: "map-pin", label: "Auditoría GPS y Permisos", step: "CAMPO", short: "GPS" }
     ];
@@ -707,6 +717,7 @@ function getMenuForRole(role) {
   if (role === "talento_humano") {
     return [
       { id: "rrhh_comunicados", lucide: "megaphone", label: "Memorandos y Permisos", step: "RRHH", short: "Permisos/Memos" },
+      corte,
       { id: "procesar", lucide: "file-spreadsheet", label: "Validar Huellero y Reportes", step: "MULTI-ÁREA", short: "Huellero" },
       { id: "analisis", lucide: "bar-chart-3", label: "Horas Extra y Hoja PDF", step: "REPORTES", short: "Horas Extra" },
       { id: "turnos", lucide: "clock", label: "Turnos (Administrativos)", step: "TURNOS", short: "Turnos" },
@@ -718,6 +729,7 @@ function getMenuForRole(role) {
 
   return [
     { id: "dashboard", lucide: "layout-dashboard", label: "Dashboard Ejecutivo", step: "GERENCIA", short: "Resumen" },
+    corte,
     { id: "analisis", lucide: "bar-chart-3", label: "Métricas, Gráficas y PDF", step: "AUDITORÍA", short: "Métricas" },
     { id: "supervisores_empleados", lucide: "building-2", label: "Supervisores y Empleados", step: "ESTRUCTURA", short: "Personal" },
     { id: "gps_solicitudes", lucide: "map-pin", label: "Mapa GPS y Permisos", step: "CONTROL", short: "Mapa GPS" }
@@ -892,6 +904,95 @@ function renderManagementLayout() {
   `;
 }
 
+function textoCorte(texto) {
+  return String(texto ?? "").replace(/[&<>"']/g, (letra) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[letra]);
+}
+
+function formularioCorte(corte = {}) {
+  return `<form class="corte-form" data-guardar-corte="${corte.id || ""}">
+    <label>Mes de nómina <input class="form-control" type="month" name="mes" value="${corte.mes || ""}" required></label>
+    <label>Inicio <input class="form-control" type="date" name="inicio" value="${corte.inicio || ""}" required></label>
+    <label>Fin <input class="form-control" type="date" name="fin" value="${corte.fin || ""}" required></label>
+    <button class="btn btn-primary" type="submit">${corte.id ? "Guardar fechas" : "Crear corte"}</button>
+  </form>`;
+}
+
+async function cargarVistaCortes(panel) {
+  const rol = STATE.user.role;
+  const nombres = {
+    enviar: "Enviar a Talento Humano", validar: "Validar", devolver: "Devolver",
+    cerrar: "Cerrar corte", reabrir: "Reabrir corte", observar: "Guardar observación"
+  };
+  const formulario = (accion, area = "") => `<form class="corte-form" data-accion-corte="${accion}" data-area="${area}">
+    ${["devolver", "reabrir", "observar"].includes(accion) ? `<label>${accion === "observar" ? "Observación" : "Motivo"}
+      <input class="form-control" name="motivo" required></label>` : ""}
+    <button class="btn btn-outline" type="submit">${nombres[accion]}</button>
+  </form>`;
+  try {
+    const { cortes } = await apiFetch("/api/cortes");
+    if (!panel.isConnected) return;
+    panel.innerHTML = `<h2>Cortes de nómina</h2>
+      ${rol === "talento_humano" ? formularioCorte() : ""}
+      ${cortes.length ? cortes.map((corte) => `<article class="card corte-seccion" data-corte="${corte.id}" data-revision="${corte.revision}">
+        <h3>${corte.mes} · ${corte.inicio} a ${corte.fin}</h3>
+        <p>Revisión ${corte.revision} · ${textoCorte(corte.estado)}</p>
+        ${rol === "talento_humano" && corte.revision === 1 && !corte.eventos.some((evento) => evento.accion === "enviar")
+          ? `<details><summary>Editar fechas</summary>${formularioCorte(corte)}</details>` : ""}
+        <ul class="corte-areas">${corte.areas.map((area) => `<li>
+          <strong>${textoCorte(area.nombre)}</strong> · ${textoCorte(area.estado)}
+          ${corte.estado === "ABIERTO" && ["ENVIADO", "VALIDADO"].includes(area.estado)
+            ? ` · <a href="/api/cortes/exportar?id=${corte.id}&revision=${corte.revision}&area=${area.area}">Revisar novedades</a>` : ""}
+          ${corte.estado === "ABIERTO" && rol === "supervisor" && ["PENDIENTE", "DEVUELTO"].includes(area.estado) ? formulario("enviar", area.area) : ""}
+          ${corte.estado === "ABIERTO" && rol === "talento_humano" && area.estado === "ENVIADO"
+            ? formulario("validar", area.area) + formulario("devolver", area.area) : ""}
+        </li>`).join("")}</ul>
+        ${rol === "superadmin" && corte.estado === "ABIERTO" && corte.areas.length && corte.areas.every((area) => area.estado === "VALIDADO") ? formulario("cerrar") : ""}
+        ${rol === "superadmin" && corte.estado === "CERRADO" ? formulario("reabrir") : ""}
+        ${rol === "auditor" ? formulario("observar") : ""}
+        ${corte.revisiones_cerradas.map((revision) =>
+          `<p><a href="/api/cortes/exportar?id=${corte.id}&revision=${revision}">Descargar Excel de la revisión ${revision}</a></p>`).join("")}
+        <details><summary>Historial</summary><ul>${corte.eventos.map((evento) => `<li>
+          Revisión ${evento.revision} · ${textoCorte(nombres[evento.accion] || evento.accion)} ·
+          ${textoCorte(evento.actor)} · <time datetime="${textoCorte(evento.fecha)}">${textoCorte(evento.fecha.slice(0, 16).replace("T", " "))}</time>
+          ${evento.motivo ? ` · ${textoCorte(evento.motivo)}` : ""}
+        </li>`).join("")}</ul></details>
+      </article>`).join("") : "<p>Aún no hay cortes de nómina.</p>"}`;
+    panel.querySelectorAll("form").forEach((form) => {
+      form.addEventListener("submit", async (evento) => {
+        evento.preventDefault();
+        const boton = form.querySelector("button");
+        boton.disabled = true;
+        const datos = Object.fromEntries(new FormData(form));
+        const accion = form.dataset.accionCorte;
+        if (accion) {
+          const corte = form.closest("[data-corte]");
+          Object.assign(datos, { accion, id: corte.dataset.corte, revision: corte.dataset.revision, area: form.dataset.area });
+        } else if (form.dataset.guardarCorte) {
+          datos.id = form.dataset.guardarCorte;
+        }
+        try {
+          await apiFetch(accion ? "/api/cortes/accion" : "/api/cortes", { method: "POST", body: JSON.stringify(datos) });
+          await cargarVistaCortes(panel);
+          showToast("Corte actualizado", "success");
+        } catch (error) {
+          showToast(error.message, "error");
+        } finally {
+          boton.disabled = false;
+        }
+      });
+    });
+  } catch (error) {
+    panel.textContent = error.message;
+    const reintentar = document.createElement("button");
+    reintentar.className = "btn btn-outline";
+    reintentar.textContent = "Reintentar";
+    reintentar.addEventListener("click", () => cargarVistaCortes(panel));
+    panel.append(reintentar);
+  }
+}
+
 function renderManagementViewContent() {
   switch (STATE.activeView) {
     case "areas_usuarios":
@@ -910,6 +1011,8 @@ function renderManagementViewContent() {
       return renderAdminAsignacion();
     case "procesar":
       return renderAdminProcesar();
+    case "cortes":
+      return '<section id="cortes-panel" class="card" aria-live="polite">Cargando cortes…</section>';
     case "analisis":
       return renderAdminAnalisis();
     case "empleados":
@@ -1277,7 +1380,7 @@ function renderActiveDrawer() {
   }
 
   if (STATE.activeDrawer === "emp_solicitud") {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = fechaBogota.format();
     return `
       <div class="drawer-backdrop" id="drawer-backdrop">
         <div class="drawer-panel">
@@ -2420,10 +2523,8 @@ function renderAdminAsignacion() {
 // ============================================================================
 
 function renderAdminProcesar() {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const lastDay = new Date(y, now.getMonth() + 1, 0).getDate();
+  const [y, m] = fechaBogota.format().split("-");
+  const lastDay = new Date(Number(y), Number(m), 0).getDate();
   const prev = STATE.huelleroPreview;
   const isSup = STATE.user.role === "supervisor";
   const tab = STATE.procesarTab || "validar";
@@ -2598,7 +2699,7 @@ function renderAdminAnalisis() {
   const { kpis, filas, turnos_disponibles } = STATE.analisisData;
   const f = STATE.analisisFiltros;
   const isSup = STATE.user.role === "supervisor";
-  const canProcessHuellero = ["superadmin", "supervisor", "auditor", "talento_humano"].includes(STATE.user.role);
+  const canProcessHuellero = ["superadmin", "supervisor", "talento_humano"].includes(STATE.user.role);
 
   const kpiCards = [
     { key: "horas_extra", label: "Total Horas Extras", val: Number(kpis.horas_extra || 0).toFixed(2) },
@@ -2608,21 +2709,6 @@ function renderAdminAnalisis() {
   ];
 
   return `
-    ${
-      STATE.user.role === "auditor"
-        ? `
-      <div class="alert-banner alert-ok no-print">
-        <div>
-          <strong>🔍 Panel del Auditor de Horas Extras:</strong> Consulta todos los reportes generados o pulsa <strong>"Generar Nuevo Reporte con Huellero"</strong> si algún área o empleado aún no tiene su reporte hecho.
-        </div>
-        <button type="button" class="btn btn-action btn-sm" data-goto="procesar">
-          ⚙️ Generar Nuevo Reporte con Huellero →
-        </button>
-      </div>
-    `
-        : ""
-    }
-
     <div class="grid-4 no-print" style="margin-bottom:18px;">
       ${kpiCards
         .map(
@@ -2708,6 +2794,13 @@ function renderAdminAnalisis() {
               .join("")}
           </select>
         </div>
+        <fieldset class="form-group">
+          <legend class="form-label">Turnos</legend>
+          ${turnos_disponibles.length ? turnos_disponibles.map((turno) => `
+            <label class="corte-check"><input type="checkbox" name="ana-turno"
+              value="${textoCorte(turno)}" ${f.turnos.includes(turno) ? "checked" : ""}> ${textoCorte(turno)}</label>
+          `).join("") : "<small>Sin turnos procesados</small>"}
+        </fieldset>
         <div class="form-group" style="margin-bottom:0;">
           <label class="form-label">Fecha Inicio</label>
           <input type="date" id="ana-inicio" class="form-control" value="${f.fecha_inicio}" />
@@ -3291,6 +3384,9 @@ function bindManagementEvents() {
       renderApp();
     }
   });
+
+  const cortesPanel = document.getElementById("cortes-panel");
+  if (cortesPanel) cargarVistaCortes(cortesPanel);
 
   // --- Eventos Drawer / Modal Corporativo Global ---
   document.getElementById("btn-open-mobile-menu")?.addEventListener("click", () => openDrawer("mobile_menu", null));
@@ -3950,6 +4046,7 @@ function bindManagementEvents() {
   document.getElementById("btn-aplicar-analisis")?.addEventListener("click", async () => {
     STATE.analisisFiltros.id_area = document.getElementById("ana-area")?.value || "";
     STATE.analisisFiltros.id_empleado = document.getElementById("ana-emp").value;
+    STATE.analisisFiltros.turnos = Array.from(document.querySelectorAll('input[name="ana-turno"]:checked'), (input) => input.value);
     STATE.analisisFiltros.fecha_inicio = document.getElementById("ana-inicio").value;
     STATE.analisisFiltros.fecha_fin = document.getElementById("ana-fin").value;
     await loadAnalisis();
@@ -4267,8 +4364,9 @@ function renderEmpleadoViewContent() {
 
   if (STATE.activeView === "emp_reloj") {
     const now = new Date();
-    const timeStr = now.toTimeString().slice(0, 8);
+    const timeStr = horaBogota.format(now);
     const dateStr = now.toLocaleDateString("es-CO", {
+      timeZone: ZONA_NOMINA,
       weekday: "long",
       year: "numeric",
       month: "long",
@@ -4712,7 +4810,7 @@ function bindEmpleadoEvents() {
 setInterval(() => {
   const el = document.getElementById("live-clock-time");
   if (el) {
-    el.textContent = new Date().toTimeString().slice(0, 8);
+    el.textContent = horaBogota.format();
   }
 }, 1000);
 

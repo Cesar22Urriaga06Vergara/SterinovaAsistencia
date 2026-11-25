@@ -4,6 +4,8 @@ from hmac import compare_digest
 from secrets import token_bytes
 from pathlib import Path
 from datetime import date
+from core.rutas import ahora_bogota
+from core.cortes import AccesoCorte, ConflictoCorte
 from typing import Optional
 import os
 import sys
@@ -817,8 +819,7 @@ class Database:
         observaciones: str = "",
         fecha_hora: Optional[str] = None,
     ) -> int:
-        from datetime import datetime
-        ahora = fecha_hora or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = fecha_hora or ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO marcaciones_moviles
@@ -883,8 +884,7 @@ class Database:
         destino_id: str = "",
         id_area: Optional[int] = None,
     ) -> int:
-        from datetime import datetime
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         with self.connection:
             cursor = self.connection.execute(
                 """INSERT INTO notificaciones
@@ -933,8 +933,7 @@ class Database:
         fecha_fin: str,
         motivo: str,
     ) -> int:
-        from datetime import datetime
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         emp_row = self.connection.execute(
             "SELECT nombre, id_area FROM empleados WHERE id_empleado = ?",
             (str(id_empleado).strip(),),
@@ -991,9 +990,10 @@ class Database:
         respuesta: str = "",
         autor_rol: str = "supervisor",
         autor_nombre: str = "",
+        autor_area: int | None = None,
     ) -> None:
         sol = self.connection.execute(
-            """SELECT s.*, COALESCE(e.nombre, s.id_empleado) AS nombre_empleado
+            """SELECT s.*, e.id_area, COALESCE(e.nombre, s.id_empleado) AS nombre_empleado
                FROM solicitudes_empleado s
                LEFT JOIN empleados e ON e.id_empleado = s.id_empleado
                WHERE s.id = ?""",
@@ -1004,6 +1004,19 @@ class Database:
 
         est = estado.upper().strip()
         rol_limpio = autor_rol.strip().lower()
+
+        if rol_limpio == "supervisor":
+            if autor_area is None or sol["id_area"] != autor_area:
+                raise AccesoCorte("La solicitud no pertenece a su área.")
+            if sol["estado"] != "PENDIENTE_SUPERVISOR":
+                raise ConflictoCorte("La solicitud ya fue revisada por el supervisor.")
+            if est not in ("AVALADO_SUPERVISOR", "RECHAZADA_SUPERVISOR"):
+                raise ValueError("Estado de solicitud inválido.")
+        else:
+            if est not in ("APROBADA", "RECHAZADA"):
+                raise ValueError("Estado de solicitud inválido.")
+            if sol["estado"] != "AVALADO_SUPERVISOR":
+                raise ConflictoCorte("La decisión final requiere un aval pendiente de Talento Humano.")
 
         with self.connection:
             if rol_limpio == "supervisor":
@@ -1057,8 +1070,7 @@ class Database:
         fecha_evento: str = "",
         autor: str = "Talento Humano",
     ) -> int:
-        from datetime import datetime
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         dt_tipo = destino_tipo.strip().upper()  # 'TODOS' | 'AREA' | 'EMPLEADO'
         dt_val = str(destino_valor).strip()
 
@@ -1148,8 +1160,7 @@ class Database:
         return resultado
 
     def confirmar_lectura_comunicado(self, id_comunicado: int, id_empleado: str) -> None:
-        from datetime import datetime
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         with self.connection:
             self.connection.execute(
                 """INSERT OR REPLACE INTO comunicados_lecturas (id_comunicado, id_empleado, leido_en)
@@ -1159,10 +1170,9 @@ class Database:
 
     # --- HISTÓRICO PERMANENTE DE MÉTRICAS (PARA ADMIN GENERAL Y AUDITOR) ---
     def guardar_historico_metricas(self, filas: list[dict]) -> int:
-        from datetime import datetime
         if not filas:
             return 0
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ahora = ahora_bogota().strftime("%Y-%m-%d %H:%M:%S")
         registros = []
         for f in filas:
             emp_id = str(f.get("id_empleado", "")).strip()
@@ -1233,8 +1243,8 @@ class Database:
         }
 
     def limpiar_notificaciones_leidas(self, dias: int = 30) -> int:
-        from datetime import datetime, timedelta
-        corte = (datetime.now() - timedelta(days=max(0, int(dias)))).strftime("%Y-%m-%d %H:%M:%S")
+        from datetime import timedelta
+        corte = (ahora_bogota() - timedelta(days=max(0, int(dias)))).strftime("%Y-%m-%d %H:%M:%S")
         with self.connection:
             if dias <= 0:
                 cur = self.connection.execute("DELETE FROM notificaciones WHERE leida = 1")
